@@ -40,6 +40,9 @@ var bot_assists: Array[int] = []
 var bot_names: Array[String] = []
 var spawn_markers: Array[Marker3D] = []
 var pickups: Array[Area3D] = []
+var pickup_by_id: Dictionary = {}
+var pickup_sent_peers: Dictionary = {}
+var next_pickup_id := 1
 var pickup_spawn_timer := 3.0
 var player_rage_progress := 0.0
 var player_score := 0
@@ -53,6 +56,8 @@ var player_assists := 0
 var leaderboard_panel: PanelContainer
 var leaderboard_cells: Array[Label] = []
 var match_clock_label: Label
+var results_overlay: ColorRect
+var results_label: Label
 
 
 func _ready() -> void:
@@ -111,6 +116,7 @@ func _process(delta: float) -> void:
 	if toast_timer > 0.0:
 		toast_timer -= delta
 		toast_label.visible = toast_timer > 0.0
+	_interpolate_network_cars(delta)
 	if GameState.multiplayer_mode and multiplayer.is_server() and match_time_left > 0.0:
 		match_time_left = maxf(0.0, match_time_left - delta)
 		GameState.match_time_remaining = match_time_left
@@ -123,11 +129,13 @@ func _process(delta: float) -> void:
 			_send_network_state()
 			if multiplayer.is_server():
 				_send_bot_states()
+				_sync_pickups_to_peers()
 	if is_instance_valid(player) and (player.health <= 0.0 or (not player.is_defeated and player.global_position.y < ARENA_FALL_HEIGHT)):
 		_player_fell()
 	if GameState.multiplayer_mode and multiplayer.is_server():
 		for remote in remote_players.values():
 			if is_instance_valid(remote) and not remote.is_defeated and (remote.health <= 0.0 or remote.global_position.y < ARENA_FALL_HEIGHT):
+				remote.rage_progress = maxf(0.0, remote.rage_progress - 10.0)
 				_award_fall(remote)
 				remote.is_defeated = true
 	for index in bots.size():
@@ -146,7 +154,7 @@ func _process(delta: float) -> void:
 			bot.set_collision_mask_value(1, false)
 			bot_respawn_timers[index] = BOT_RESPAWN_DELAY
 			bot.queue_free()
-		elif not is_instance_valid(bot) and bot_respawn_timers[index] > 0.0:
+		elif not match_over and not is_instance_valid(bot) and bot_respawn_timers[index] > 0.0:
 			bot_respawn_timers[index] -= delta
 			if bot_respawn_timers[index] <= 0.0:
 				var record: Dictionary = GameState.lobby_players.get(bot_network_ids[index], {}) if GameState.multiplayer_mode else {}
@@ -156,7 +164,8 @@ func _process(delta: float) -> void:
 	for car in _active_cars():
 		if car.add_rage_progress(delta * RAGE_SURVIVAL_RATE) and car == player:
 			_show_notification("RAGE AKTIF  •  10 DETIK", Color("ff5148"))
-	_update_pickups(delta)
+	if not match_over:
+		_update_pickups(delta)
 	_update_spectator_target()
 	_update_camera(delta)
 	_update_player_hud()
@@ -195,6 +204,8 @@ func _spawn_player(marker: Marker3D) -> CharacterBody3D:
 	car.assists = player_assists
 	if GameState.multiplayer_mode:
 		car.remote_bot_hit.connect(_on_remote_bot_hit)
+		car.remote_player_hit.connect(_on_bot_remote_player_hit)
+		car.remote_player_contact.connect(_on_remote_player_contact)
 	_place_car(car, marker)
 	add_child(car)
 	car.name = "PlayerCar"
@@ -245,7 +256,7 @@ func _sync_remote_roster() -> void:
 func _send_network_state() -> void:
 	if not is_instance_valid(player):
 		return
-	var state := {"id": multiplayer.get_unique_id(), "position": player.global_position, "rotation": player.rotation.y, "speed": player.speed, "health": player.health, "score": player.score, "kills": player.kills, "deaths": player.deaths, "assists": player.assists, "time_left": match_time_left}
+	var state := _car_network_state(player, multiplayer.get_unique_id())
 	if multiplayer.is_server():
 		_relay_network_state(state)
 	else:
@@ -263,16 +274,39 @@ func _send_bot_state(index: int) -> void:
 	var bot := bots[index]
 	if not is_instance_valid(bot):
 		return
-	var state := {"id": bot_network_ids[index], "position": bot.global_position, "rotation": bot.rotation.y, "speed": bot.speed, "health": bot.health, "score": bot.score, "kills": bot.kills, "deaths": bot.deaths, "assists": bot.assists, "time_left": match_time_left}
+	var state := _car_network_state(bot, bot_network_ids[index])
 	for peer_id in GameState.game_ready_peers:
 		_rpc_apply_network_state.rpc_id(int(peer_id), state)
+
+
+func _car_network_state(car: CharacterBody3D, network_id: int) -> Dictionary:
+	return {
+		"id": network_id,
+		"position": car.global_position,
+		"rotation": car.rotation.y,
+		"speed": car.speed,
+		"health": car.health,
+		"score": car.score,
+		"kills": car.kills,
+		"deaths": car.deaths,
+		"assists": car.assists,
+		"nos_energy": car.nos_energy,
+		"blue_shield_time": car.blue_shield_time,
+		"unlimited_nos_time": car.unlimited_nos_time,
+		"jump_charges": car.jump_charges,
+		"rage_progress": car.rage_progress,
+		"rage_time": car.rage_time,
+		"is_boosting": car.is_boosting,
+		"is_defeated": car.is_defeated,
+		"time_left": match_time_left
+	}
 
 
 func _on_remote_bot_hit(bot_id: int, impact: Vector3, damage_multiplier: float) -> void:
 	if bot_id < 0 and not multiplayer.is_server():
 		var key := "local:%d" % bot_id
 		var now := Time.get_ticks_msec()
-		if now - int(bot_contact_times.get(key, -1000)) < 350:
+		if now - int(bot_contact_times.get(key, -1000)) < 250:
 			return
 		bot_contact_times[key] = now
 		_rpc_hit_bot.rpc_id(1, bot_id, impact, damage_multiplier)
@@ -288,29 +322,78 @@ func _rpc_hit_bot(bot_id: int, impact: Vector3, damage_multiplier: float) -> voi
 		return
 	var bot := bots[slot]
 	var attacker: CharacterBody3D = remote_players[sender]
-	if bot.is_defeated or attacker.global_position.distance_to(bot.global_position) > 7.0:
+	_server_apply_contact(attacker, bot_id, impact, damage_multiplier)
+
+
+func _on_remote_player_contact(victim_id: int, impact: Vector3, damage_multiplier: float) -> void:
+	if GameState.multiplayer_mode and not multiplayer.is_server():
+		var key := "%d:%d" % [multiplayer.get_unique_id(), victim_id]
+		var now := Time.get_ticks_msec()
+		if now - int(bot_contact_times.get(key, -1000)) < 250:
+			return
+		bot_contact_times[key] = now
+		_rpc_report_player_contact.rpc_id(1, victim_id, impact, damage_multiplier)
+
+
+@rpc("any_peer", "call_remote", "reliable")
+func _rpc_report_player_contact(victim_id: int, impact: Vector3, damage_multiplier: float) -> void:
+	if not multiplayer.is_server():
 		return
-	bot.record_touch(attacker)
-	bot.receive_bump(impact.limit_length(45.0), clampf(damage_multiplier, 0.0, 2.0))
+	var sender := multiplayer.get_remote_sender_id()
+	if not remote_players.has(sender):
+		return
+	_server_apply_contact(remote_players[sender], victim_id, impact, damage_multiplier)
 
 
 func _on_bot_remote_player_hit(peer_id: int, bot_id: int, impact: Vector3, damage_multiplier: float) -> void:
-	if peer_id <= 1 or not multiplayer.is_server():
+	if peer_id <= 1 or not multiplayer.is_server() or not remote_players.has(peer_id):
 		return
 	var key := "%d:%d" % [peer_id, bot_id]
 	var now := Time.get_ticks_msec()
-	if now - int(bot_contact_times.get(key, -1000)) < 350:
+	if now - int(bot_contact_times.get(key, -1000)) < 180:
 		return
 	bot_contact_times[key] = now
-	if GameState.game_ready_peers.has(peer_id):
-		_rpc_apply_bot_hit.rpc_id(peer_id, bot_id, impact, damage_multiplier)
+	var attacker := _network_car(bot_id)
+	if is_instance_valid(attacker):
+		_server_apply_contact(attacker, peer_id, impact, damage_multiplier)
+
+
+
+func _network_car(network_id: int) -> CharacterBody3D:
+	if network_id == 1:
+		return player
+	if network_id < 0:
+		var slot := bot_network_ids.find(network_id)
+		return bots[slot] if slot >= 0 and slot < bots.size() else null
+	return remote_players.get(network_id) as CharacterBody3D
+
+
+func _server_apply_contact(attacker: CharacterBody3D, victim_id: int, impact: Vector3, damage_multiplier: float) -> void:
+	if not multiplayer.is_server() or not is_instance_valid(attacker):
+		return
+	var victim := _network_car(victim_id)
+	if not is_instance_valid(victim) or victim.is_defeated or attacker.is_defeated:
+		return
+	if attacker.global_position.distance_to(victim.global_position) > 8.0:
+		return
+	victim.record_touch(attacker)
+	if impact.length() > 0.5:
+		victim.receive_bump(impact.limit_length(45.0), clampf(damage_multiplier, 0.0, 2.0))
+	if victim_id > 1 and GameState.game_ready_peers.has(victim_id):
+		_rpc_apply_contact.rpc_id(victim_id, int(attacker.get_meta("network_id", 1)), impact.limit_length(45.0), clampf(damage_multiplier, 0.0, 2.0))
+	if victim_id < 0:
+		var slot := bot_network_ids.find(victim_id)
+		if slot >= 0:
+			_send_bot_state(slot)
 
 
 @rpc("authority", "call_remote", "reliable")
-func _rpc_apply_bot_hit(bot_id: int, impact: Vector3, damage_multiplier: float) -> void:
-	if not is_instance_valid(player) or not remote_players.has(bot_id):
+func _rpc_apply_contact(attacker_id: int, impact: Vector3, damage_multiplier: float) -> void:
+	if not is_instance_valid(player):
 		return
-	player.record_touch(remote_players[bot_id])
+	var attacker := _network_car(attacker_id)
+	if is_instance_valid(attacker):
+		player.record_touch(attacker)
 	player.receive_bump(impact, damage_multiplier)
 
 
@@ -324,9 +407,32 @@ func _rpc_network_state(state: Dictionary) -> void:
 	if remote_players.has(sender):
 		var remote: CharacterBody3D = remote_players[sender]
 		var reported_position: Vector3 = state.get("position", remote.global_position)
+		var reported_health := float(state.get("health", remote.health))
+		if remote.is_defeated and not match_over and reported_health > 0.0 and reported_position.y >= ARENA_FALL_HEIGHT:
+			remote.is_defeated = false
+			remote.health = reported_health
+			remote.nos_energy = float(state.get("nos_energy", remote.nos_energy))
+			remote.blue_shield_time = 0.0
+			remote.unlimited_nos_time = 0.0
+			remote.jump_charges = 0
+			remote.rage_progress = float(state.get("rage_progress", maxf(0.0, remote.rage_progress - 10.0)))
+			remote.rage_time = 0.0
+			remote.recent_attackers.clear()
 		if not remote.is_defeated and (float(state.get("health", remote.health)) <= 0.0 or reported_position.y < ARENA_FALL_HEIGHT):
+			remote.rage_progress = maxf(0.0, remote.rage_progress - 10.0)
 			_award_fall(remote)
 			remote.is_defeated = true
+		# The host owns scoring and pickup effects; clients only report movement and NOS use.
+		state["score"] = remote.score
+		state["kills"] = remote.kills
+		state["deaths"] = remote.deaths
+		state["assists"] = remote.assists
+		state["blue_shield_time"] = remote.blue_shield_time
+		state["unlimited_nos_time"] = remote.unlimited_nos_time
+		state["jump_charges"] = mini(remote.jump_charges, int(state.get("jump_charges", remote.jump_charges)))
+		state["rage_progress"] = remote.rage_progress
+		state["rage_time"] = remote.rage_time
+		state["is_defeated"] = remote.is_defeated
 	_relay_network_state(state)
 
 
@@ -335,10 +441,8 @@ func _relay_network_state(state: Dictionary) -> void:
 	var id := int(state.get("id", -1))
 	if id != 1 and remote_players.has(id):
 		var authoritative_car: CharacterBody3D = remote_players[id]
-		state["score"] = authoritative_car.score
-		state["kills"] = authoritative_car.kills
-		state["deaths"] = authoritative_car.deaths
-		state["assists"] = authoritative_car.assists
+		for key in ["score", "kills", "deaths", "assists", "nos_energy", "blue_shield_time", "unlimited_nos_time", "jump_charges", "rage_progress", "rage_time", "is_boosting", "is_defeated"]:
+			state[key] = authoritative_car.get(key)
 	for peer_id in GameState.game_ready_peers:
 		_rpc_apply_network_state.rpc_id(int(peer_id), state)
 
@@ -362,6 +466,7 @@ func _apply_network_state(state: Dictionary) -> void:
 			player.kills = int(state.get("kills", player.kills))
 			player.deaths = int(state.get("deaths", player.deaths))
 			player.assists = int(state.get("assists", player.assists))
+			_apply_car_ability_state(player, state)
 		return
 	if not remote_players.has(id):
 		var record: Dictionary = GameState.lobby_players.get(id, {"name": "Pemain %d" % id, "car": 0})
@@ -369,16 +474,46 @@ func _apply_network_state(state: Dictionary) -> void:
 			return
 		_spawn_remote_player(id, record)
 	var car: CharacterBody3D = remote_players[id]
-	car.global_position = state.get("position", car.global_position)
-	car.rotation.y = float(state.get("rotation", car.rotation.y))
+	car.set_meta("network_target_position", state.get("position", car.global_position))
+	car.set_meta("network_target_rotation", float(state.get("rotation", car.rotation.y)))
 	car.speed = float(state.get("speed", 0.0))
+	car.planar_velocity = -car.global_basis.z * car.speed
 	car.health = float(state.get("health", 100.0))
 	car.score = int(state.get("score", 0))
 	car.kills = int(state.get("kills", 0))
 	car.deaths = int(state.get("deaths", 0))
 	car.assists = int(state.get("assists", 0))
-	car.is_defeated = car.health <= 0.0 or car.global_position.y < ARENA_FALL_HEIGHT
+	_apply_car_ability_state(car, state)
+	car.is_defeated = bool(state.get("is_defeated", false)) or car.health <= 0.0 or car.global_position.y < ARENA_FALL_HEIGHT
 	car.visible = not car.is_defeated
+	car._update_health_bar()
+	car._update_ability_visuals()
+
+
+func _interpolate_network_cars(delta: float) -> void:
+	var weight := 1.0 - exp(-18.0 * delta)
+	for car in remote_players.values():
+		if not is_instance_valid(car):
+			continue
+		var target_position: Vector3 = car.get_meta("network_target_position", car.global_position)
+		var distance := car.global_position.distance_to(target_position)
+		if distance > 12.0:
+			car.global_position = target_position
+		else:
+			car.global_position = car.global_position.lerp(target_position, weight)
+		var target_rotation := float(car.get_meta("network_target_rotation", car.rotation.y))
+		car.rotation.y = lerp_angle(car.rotation.y, target_rotation, weight)
+		car.planar_velocity = -car.global_basis.z * car.speed
+
+
+func _apply_car_ability_state(car: CharacterBody3D, state: Dictionary) -> void:
+	car.nos_energy = float(state.get("nos_energy", car.nos_energy))
+	car.blue_shield_time = float(state.get("blue_shield_time", car.blue_shield_time))
+	car.unlimited_nos_time = float(state.get("unlimited_nos_time", car.unlimited_nos_time))
+	car.jump_charges = int(state.get("jump_charges", car.jump_charges))
+	car.rage_progress = float(state.get("rage_progress", car.rage_progress))
+	car.rage_time = float(state.get("rage_time", car.rage_time))
+	car.is_boosting = bool(state.get("is_boosting", car.is_boosting))
 
 
 func _spawn_bot(marker: Marker3D, slot: int, record: Dictionary = {}) -> CharacterBody3D:
@@ -705,6 +840,7 @@ func _build_hud() -> void:
 	toast_label.add_theme_constant_override("shadow_offset_y", 2)
 	toast_label.visible = false
 	canvas.add_child(toast_label)
+	_build_match_results(canvas)
 	_update_leaderboard()
 
 
@@ -783,11 +919,144 @@ func _leaderboard_before(a: Dictionary, b: Dictionary) -> bool:
 
 
 func _set_match_over() -> void:
+	if match_over:
+		return
 	match_over = true
-	for car in _active_cars():
-		car.match_over = true
-	_show_notification("WAKTU HABIS  •  MATCH SELESAI", Color("f4bb3b"))
+	_freeze_match_cars()
+	if not GameState.multiplayer_mode:
+		_show_match_results(_collect_match_results())
+	elif multiplayer.is_server():
+		var results := _collect_match_results()
+		_show_match_results(results)
+		for peer_id in GameState.game_ready_peers:
+			_rpc_match_results.rpc_id(int(peer_id), results)
 
+
+func _freeze_match_cars() -> void:
+	if is_instance_valid(player):
+		player.match_over = true
+	if is_instance_valid(fallen_player):
+		fallen_player.match_over = true
+	for bot in bots:
+		if is_instance_valid(bot):
+			bot.match_over = true
+	for remote in remote_players.values():
+		if is_instance_valid(remote):
+			remote.match_over = true
+
+
+func _collect_match_results() -> Array[Dictionary]:
+	var entries: Array[Dictionary] = []
+	if GameState.multiplayer_mode:
+		for id in GameState.lobby_players:
+			var record: Dictionary = GameState.lobby_players[id]
+			if bool(record.get("spectator", false)):
+				continue
+			var car: CharacterBody3D
+			if int(id) == 1:
+				car = player if is_instance_valid(player) else fallen_player
+			elif int(id) < 0 and GameState.room_host:
+				var slot := bot_network_ids.find(int(id))
+				if slot >= 0 and slot < bots.size():
+					car = bots[slot]
+					if not is_instance_valid(car):
+						entries.append(_stored_bot_result(slot, str(record.get("name", "Bot")), id))
+						continue
+			else:
+				car = remote_players.get(id) as CharacterBody3D
+			entries.append(_result_entry(str(record.get("name", "Pemain")), car, id))
+	else:
+		var local_car := player if is_instance_valid(player) else fallen_player
+		entries.append(_result_entry(GameState.player_name, local_car, 1))
+		for index in bots.size():
+			if is_instance_valid(bots[index]):
+				entries.append(_result_entry(bot_names[index], bots[index], index))
+			else:
+				entries.append(_stored_bot_result(index, bot_names[index], index))
+	entries.sort_custom(_leaderboard_before)
+	return entries
+
+
+func _result_entry(name: String, car: CharacterBody3D, id: Variant) -> Dictionary:
+	if is_instance_valid(car):
+		return {"id": id, "name": name, "k": car.kills, "d": car.deaths, "a": car.assists, "score": car.score}
+	return {"id": id, "name": name, "k": 0, "d": 0, "a": 0, "score": 0}
+
+
+func _stored_bot_result(index: int, name: String, id: Variant) -> Dictionary:
+	return {
+		"id": id,
+		"name": name,
+		"k": bot_kills[index] if index < bot_kills.size() else 0,
+		"d": bot_deaths[index] if index < bot_deaths.size() else 0,
+		"a": bot_assists[index] if index < bot_assists.size() else 0,
+		"score": bot_scores[index] if index < bot_scores.size() else 0
+	}
+
+
+func _show_match_results(entries: Array) -> void:
+	if not is_instance_valid(results_overlay):
+		return
+	var lines := PackedStringArray(["#   PEMAIN                         K    D    A    POIN"])
+	for index in mini(entries.size(), 8):
+		var entry: Dictionary = entries[index]
+		lines.append("%d. %s   K:%d D:%d A:%d   Poin:%d" % [index + 1, str(entry.get("name", "Pemain")), int(entry.get("k", 0)), int(entry.get("d", 0)), int(entry.get("a", 0)), int(entry.get("score", 0))])
+	if entries.is_empty():
+		lines.append("Belum ada statistik pertandingan.")
+	results_label.text = "\n".join(lines)
+	results_overlay.visible = true
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
+
+@rpc("authority", "call_remote", "reliable")
+func _rpc_match_results(entries: Array) -> void:
+	match_over = true
+	_freeze_match_cars()
+	_show_match_results(entries)
+
+
+func _build_match_results(parent: Control) -> void:
+	results_overlay = ColorRect.new()
+	results_overlay.name = "Match results"
+	results_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	results_overlay.color = Color(0.015, 0.02, 0.03, 0.82)
+	results_overlay.visible = false
+	results_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	parent.add_child(results_overlay)
+	var center := CenterContainer.new()
+	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	results_overlay.add_child(center)
+	var panel := PanelContainer.new()
+	panel.custom_minimum_size = Vector2(620.0, 0.0)
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color("202833")
+	style.border_color = Color("f4bb3b")
+	style.set_border_width_all(2)
+	style.set_corner_radius_all(14)
+	style.content_margin_left = 24
+	style.content_margin_right = 24
+	style.content_margin_top = 22
+	style.content_margin_bottom = 22
+	panel.add_theme_stylebox_override("panel", style)
+	center.add_child(panel)
+	var layout := VBoxContainer.new()
+	layout.add_theme_constant_override("separation", 16)
+	panel.add_child(layout)
+	var title := Label.new()
+	title.text = "MATCH SELESAI  •  HASIL PERTANDINGAN"
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_font_size_override("font_size", 24)
+	title.add_theme_color_override("font_color", Color("f4bb3b"))
+	layout.add_child(title)
+	results_label = Label.new()
+	results_label.add_theme_font_size_override("font_size", 15)
+	results_label.add_theme_color_override("font_color", Color("e5ebf0"))
+	layout.add_child(results_label)
+	var menu_button := Button.new()
+	menu_button.text = "KEMBALI KE MENU"
+	menu_button.custom_minimum_size.y = 44
+	menu_button.pressed.connect(_return_to_menu)
+	layout.add_child(menu_button)
 
 func _return_to_menu() -> void:
 	GameState.close_room()
@@ -858,24 +1127,61 @@ func _award_fall(victim: CharacterBody3D) -> void:
 
 
 func _update_pickups(delta: float) -> void:
-	pickup_spawn_timer -= delta
 	for pickup in pickups:
 		if is_instance_valid(pickup):
 			var base_y: float = pickup.get_meta("base_y", 0.5)
 			var phase: float = pickup.get_meta("phase", 0.0)
 			pickup.position.y = base_y + sin(Time.get_ticks_msec() * 0.002 + phase) * 0.16
 			pickup.rotation.y += delta * 0.9
+	if GameState.multiplayer_mode and not multiplayer.is_server():
+		return
+	pickup_spawn_timer -= delta
 	if pickup_spawn_timer <= 0.0 and pickups.size() < 3:
 		_spawn_pickup()
 		pickup_spawn_timer = randf_range(6.0, 9.0)
 
 
 func _spawn_pickup() -> void:
+	if GameState.multiplayer_mode and not multiplayer.is_server():
+		return
 	var angle := randf_range(0.0, TAU)
 	var radius := sqrt(randf()) * 28.0
+	var spawn_position := Vector3(sin(angle) * radius, 0.5, cos(angle) * radius)
+	var pickup_id := next_pickup_id
+	next_pickup_id += 1
+	var ability: String = PICKUP_TYPES[randi() % PICKUP_TYPES.size()]
+	var phase := randf_range(0.0, TAU)
+	_create_pickup(pickup_id, ability, spawn_position, phase)
+	_sync_pickups_to_peers()
+
+
+func _sync_pickups_to_peers() -> void:
+	if not GameState.multiplayer_mode or not multiplayer.is_server():
+		return
+	for peer_id in GameState.game_ready_peers:
+		var sent_ids: Dictionary = pickup_sent_peers.get(peer_id, {})
+		for pickup_id in pickup_by_id:
+			if sent_ids.has(pickup_id):
+				continue
+			var pickup: Area3D = pickup_by_id[pickup_id]
+			if not is_instance_valid(pickup):
+				continue
+			_rpc_spawn_pickup.rpc_id(int(peer_id), int(pickup_id), str(pickup.get_meta("ability")), Vector3(pickup.get_meta("spawn_position")), float(pickup.get_meta("phase")))
+			sent_ids[pickup_id] = true
+		pickup_sent_peers[peer_id] = sent_ids
+
+
+@rpc("authority", "call_remote", "reliable")
+func _rpc_spawn_pickup(pickup_id: int, ability: String, spawn_position: Vector3, phase: float) -> void:
+	_create_pickup(pickup_id, ability, spawn_position, phase)
+
+
+func _create_pickup(pickup_id: int, ability: String, spawn_position: Vector3, phase: float) -> void:
+	if pickup_by_id.has(pickup_id) and is_instance_valid(pickup_by_id[pickup_id]):
+		return
 	var pickup := Area3D.new()
-	pickup.name = "Arena pickup"
-	pickup.position = Vector3(sin(angle) * radius, 0.5, cos(angle) * radius)
+	pickup.name = "Arena pickup %d" % pickup_id
+	pickup.position = spawn_position
 	pickup.collision_layer = 0
 	pickup.collision_mask = 1
 	var shape := CollisionShape3D.new()
@@ -884,7 +1190,6 @@ func _spawn_pickup() -> void:
 	shape.shape = sphere_shape
 	shape.position.y = 0.5
 	pickup.add_child(shape)
-	var ability: String = PICKUP_TYPES[randi() % PICKUP_TYPES.size()]
 	var color := Color("2799ff")
 	var label_text := "SHIELD"
 	match ability:
@@ -930,17 +1235,36 @@ func _spawn_pickup() -> void:
 	light.omni_range = 5.0
 	light.position.y = 0.8
 	pickup.add_child(light)
-	pickup.set_meta("base_y", pickup.position.y)
-	pickup.set_meta("phase", randf_range(0.0, TAU))
-	pickup.body_entered.connect(_on_pickup_collected.bind(pickup, ability))
+	pickup.set_meta("pickup_id", pickup_id)
+	pickup.set_meta("ability", ability)
+	pickup.set_meta("base_y", spawn_position.y)
+	pickup.set_meta("spawn_position", spawn_position)
+	pickup.set_meta("phase", phase)
+	pickup.set_meta("claimed", false)
+	pickup.body_entered.connect(_on_pickup_collected.bind(pickup_id))
 	add_child(pickup)
 	pickups.append(pickup)
+	pickup_by_id[pickup_id] = pickup
 
 
-func _on_pickup_collected(body: Node3D, pickup: Area3D, ability: String) -> void:
-	if not is_instance_valid(body) or not body.has_method("apply_pickup"):
+func _on_pickup_collected(body: Node3D, pickup_id: int) -> void:
+	if not is_instance_valid(body) or not pickup_by_id.has(pickup_id):
 		return
-	body.apply_pickup(ability)
+	if GameState.multiplayer_mode and not multiplayer.is_server():
+		if body == player:
+			_rpc_request_pickup.rpc_id(1, pickup_id)
+		return
+	var pickup: Area3D = pickup_by_id[pickup_id]
+	if not is_instance_valid(pickup) or bool(pickup.get_meta("claimed", false)):
+		return
+	pickup.set_meta("claimed", true)
+	var ability := str(pickup.get_meta("ability", ""))
+	if body.has_method("apply_pickup"):
+		body.apply_pickup(ability)
+		if GameState.multiplayer_mode and body.network_remote:
+			var peer_id := int(body.get_meta("network_id", 0))
+			if peer_id > 1:
+				_rpc_apply_pickup.rpc_id(peer_id, ability)
 	if body == player:
 		var messages := {
 			"blue_shield": "PERISAI BIRU  •  5 DETIK",
@@ -948,9 +1272,55 @@ func _on_pickup_collected(body: Node3D, pickup: Area3D, ability: String) -> void
 			"jump": "LOMPAT  •  3 CHARGE  (SPACE)"
 		}
 		_show_notification(messages[ability], Color("39bbfa") if ability != "jump" else Color("ffd83d"))
-	pickups.erase(pickup)
-	pickup.queue_free()
+	_remove_pickup(pickup_id)
+	if GameState.multiplayer_mode:
+		for peer_id in GameState.game_ready_peers:
+			_rpc_remove_pickup.rpc_id(int(peer_id), pickup_id)
 
+
+@rpc("any_peer", "call_remote", "reliable")
+func _rpc_request_pickup(pickup_id: int) -> void:
+	if not multiplayer.is_server():
+		return
+	var peer_id := multiplayer.get_remote_sender_id()
+	if not remote_players.has(peer_id) or not pickup_by_id.has(pickup_id):
+		return
+	var collector: CharacterBody3D = remote_players[peer_id]
+	var pickup: Area3D = pickup_by_id[pickup_id]
+	if not is_instance_valid(pickup) or bool(pickup.get_meta("claimed", false)) or collector.global_position.distance_to(pickup.global_position) > 3.5:
+		return
+	_on_pickup_collected(collector, pickup_id)
+
+
+@rpc("authority", "call_remote", "reliable")
+func _rpc_apply_pickup(ability: String) -> void:
+	if is_instance_valid(player):
+		player.apply_pickup(ability)
+	var messages := {
+		"blue_shield": "PERISAI BIRU  •  5 DETIK",
+		"unlimited_nos": "NOS TAK TERBATAS  •  10 DETIK",
+		"jump": "LOMPAT  •  3 CHARGE  (SPACE)"
+	}
+	if messages.has(ability):
+		_show_notification(messages[ability], Color("ffd83d") if ability == "jump" else Color("39bbfa"))
+
+
+func _remove_pickup(pickup_id: int) -> void:
+	if not pickup_by_id.has(pickup_id):
+		return
+	var pickup: Area3D = pickup_by_id[pickup_id]
+	pickup_by_id.erase(pickup_id)
+	pickups.erase(pickup)
+	for peer_id in pickup_sent_peers:
+		var sent_ids: Dictionary = pickup_sent_peers[peer_id]
+		sent_ids.erase(pickup_id)
+	if is_instance_valid(pickup):
+		pickup.queue_free()
+
+
+@rpc("authority", "call_remote", "reliable")
+func _rpc_remove_pickup(pickup_id: int) -> void:
+	_remove_pickup(pickup_id)
 
 func _build_defeat_panel(parent: Control) -> void:
 	defeat_overlay = ColorRect.new()

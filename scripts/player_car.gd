@@ -2,6 +2,7 @@ extends CharacterBody3D
 
 signal remote_bot_hit(bot_id: int, impact: Vector3, damage_multiplier: float)
 signal remote_player_hit(peer_id: int, bot_id: int, impact: Vector3, damage_multiplier: float)
+signal remote_player_contact(victim_id: int, impact: Vector3, damage_multiplier: float)
 
 const ACCELERATION := 19.0
 const BRAKING := 27.0
@@ -16,6 +17,7 @@ const MAX_HEALTH := 100.0
 const JUMP_FORCE := 11.0
 const STEER_RATE := 1.45
 const MAX_MARKS := 420
+const BUMP_IMPULSE_COOLDOWN := 0.18
 
 var model_path := ""
 var display_name := ""
@@ -39,6 +41,7 @@ var deaths := 0
 var assists := 0
 var recent_attackers: Dictionary = {}
 var bot_jump_cooldown := 3.0
+var bump_contact_times: Dictionary = {}
 var is_drifting := false
 var is_boosting := false
 var is_defeated := false
@@ -77,15 +80,14 @@ func _ready() -> void:
 
 func _physics_process(delta: float) -> void:
 	if network_remote:
+		_tick_ability_timers(delta)
+		_update_ability_visuals()
 		return
 	if match_over:
 		velocity = Vector3.ZERO
 		move_and_slide()
 		return
-	hit_cooldown = maxf(0.0, hit_cooldown - delta)
-	blue_shield_time = maxf(0.0, blue_shield_time - delta)
-	unlimited_nos_time = maxf(0.0, unlimited_nos_time - delta)
-	rage_time = maxf(0.0, rage_time - delta)
+	_tick_ability_timers(delta)
 	_update_ability_visuals()
 	if is_defeated:
 		velocity.y -= 24.0 * delta
@@ -97,11 +99,11 @@ func _physics_process(delta: float) -> void:
 		var controls := _bot_controls()
 		throttle = controls.x
 		steer = controls.y
-		bot_jump_cooldown -= delta
-		if bot_jump_cooldown <= 0.0:
-			bot_jump_cooldown = randf_range(2.5, 5.0)
-			if is_instance_valid(ai_target) and global_position.distance_to(ai_target.global_position) < 8.0 and randf() < 0.65:
-				activate_jump()
+		if bot_jump_cooldown > 0.0:
+			bot_jump_cooldown -= delta
+		elif _should_bot_jump():
+			bot_jump_cooldown = randf_range(1.1, 1.8)
+			activate_jump()
 	else:
 		if Input.is_key_pressed(KEY_W): throttle += 1.0
 		if Input.is_key_pressed(KEY_S): throttle -= 1.0
@@ -111,7 +113,8 @@ func _physics_process(delta: float) -> void:
 	is_drifting = not is_bot and Input.is_key_pressed(KEY_SHIFT) and absf(speed) > 3.0
 	var wants_nos := false
 	if is_bot:
-		wants_nos = is_instance_valid(ai_target) and global_position.distance_to(ai_target.global_position) > 12.0 and absf(steer) < 0.35
+		var target_distance := global_position.distance_to(ai_target.global_position) if is_instance_valid(ai_target) else INF
+		wants_nos = target_distance > 9.0 and absf(steer) < 0.8 and throttle > 0.0
 	else:
 		wants_nos = Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT)
 	is_boosting = (nos_energy > 0.0 or unlimited_nos_time > 0.0) and wants_nos and throttle > 0.0
@@ -164,6 +167,30 @@ func _bot_controls() -> Vector2:
 	return Vector2(throttle, steer)
 
 
+func _should_bot_jump() -> bool:
+	if not is_instance_valid(ai_target) or jump_charges <= 0 or not is_on_floor():
+		return false
+	var distance := global_position.distance_to(ai_target.global_position)
+	if distance > 7.0:
+		return false
+	var target_velocity := Vector3.ZERO
+	if ai_target.has_method("get_impact_velocity"):
+		target_velocity = ai_target.get_impact_velocity()
+	var direction_to_bot := global_position - ai_target.global_position
+	direction_to_bot.y = 0.0
+	var approaching_speed := target_velocity.dot(direction_to_bot.normalized()) if direction_to_bot.length_squared() > 0.01 else 0.0
+	var own_charge := distance < 4.2 and absf(speed) > 14.0
+	var incoming_hit := distance < 6.0 and approaching_speed > 9.0
+	return own_charge or incoming_hit
+
+
+func _tick_ability_timers(delta: float) -> void:
+	hit_cooldown = maxf(0.0, hit_cooldown - delta)
+	blue_shield_time = maxf(0.0, blue_shield_time - delta)
+	unlimited_nos_time = maxf(0.0, unlimited_nos_time - delta)
+	rage_time = maxf(0.0, rage_time - delta)
+
+
 func _resolve_car_bumps() -> void:
 	for index in get_slide_collision_count():
 		var collision := get_slide_collision(index)
@@ -172,8 +199,16 @@ func _resolve_car_bumps() -> void:
 			continue
 		if GameState.multiplayer_mode and GameState.room_mode == "Tim 4 vs 4" and team_name != "" and team_name == other.team_name:
 			continue
+		# Keep touch attribution continuous; only the physical impulse is rate-limited.
 		other.record_touch(self)
-		var impact := (planar_velocity + bump_velocity) * 0.8
+		var normal := collision.get_normal()
+		var relative_velocity := get_impact_velocity() - _car_impact_velocity(other)
+		var closing_speed := maxf(0.0, -relative_velocity.dot(normal))
+		var can_impulse := closing_speed >= 0.5 and _can_apply_bump(other)
+		var impact := Vector3.ZERO
+		if can_impulse:
+			var impact_scale := 1.2 * (1.45 if is_boosting else 1.0)
+			impact = -normal * closing_speed * impact_scale
 		var damage_multiplier := 1.0
 		if rage_time > 0.0:
 			impact *= 2.0
@@ -181,16 +216,39 @@ func _resolve_car_bumps() -> void:
 		if blue_shield_time > 0.0:
 			impact *= 0.6
 			damage_multiplier *= 0.6
-		if GameState.multiplayer_mode and other.network_remote and other.is_bot and not GameState.room_host:
-			remote_bot_hit.emit(int(other.get_meta("network_id", 0)), impact, damage_multiplier)
-		elif GameState.multiplayer_mode and is_bot and GameState.room_host and other.network_remote:
-			remote_player_hit.emit(int(other.get_meta("network_id", 0)), int(get_meta("network_id", 0)), impact, damage_multiplier)
-		else:
+		if GameState.multiplayer_mode and other.network_remote and not GameState.room_host:
+			var victim_id := int(other.get_meta("network_id", 0))
+			if victim_id < 0:
+				remote_bot_hit.emit(victim_id, impact, damage_multiplier)
+			else:
+				remote_player_contact.emit(victim_id, impact, damage_multiplier)
+		elif GameState.multiplayer_mode and other.network_remote and GameState.room_host:
+			remote_player_hit.emit(int(other.get_meta("network_id", 0)), int(get_meta("network_id", 1)), impact, damage_multiplier)
+		elif can_impulse:
 			other.receive_bump(impact, damage_multiplier)
-		if other.blue_shield_time <= 0.0:
+		if can_impulse and other.blue_shield_time <= 0.0:
 			if rage_time <= 0.0:
 				planar_velocity *= 0.82
 				speed *= 0.82
+
+
+func _can_apply_bump(other: CharacterBody3D) -> bool:
+	var contact_id := other.get_instance_id()
+	var now := Time.get_ticks_msec()
+	if now - int(bump_contact_times.get(contact_id, -1000)) < int(BUMP_IMPULSE_COOLDOWN * 1000.0):
+		return false
+	bump_contact_times[contact_id] = now
+	return true
+
+
+func get_impact_velocity() -> Vector3:
+	return planar_velocity + bump_velocity
+
+
+func _car_impact_velocity(car: CharacterBody3D) -> Vector3:
+	if car.has_method("get_impact_velocity"):
+		return car.get_impact_velocity()
+	return Vector3.ZERO
 
 
 func receive_bump(impact: Vector3, damage_multiplier: float = 1.0) -> void:
