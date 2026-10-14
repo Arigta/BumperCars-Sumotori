@@ -1,5 +1,8 @@
 extends CharacterBody3D
 
+signal remote_bot_hit(bot_id: int, impact: Vector3, damage_multiplier: float)
+signal remote_player_hit(peer_id: int, bot_id: int, impact: Vector3, damage_multiplier: float)
+
 const ACCELERATION := 19.0
 const BRAKING := 27.0
 const DRAG := 10.0
@@ -167,7 +170,7 @@ func _resolve_car_bumps() -> void:
 		var other := collision.get_collider()
 		if not other is CharacterBody3D or other == self or not other.has_method("receive_bump"):
 			continue
-		if GameState.multiplayer_mode and team_name != "" and team_name == other.team_name:
+		if GameState.multiplayer_mode and GameState.room_mode == "Tim 4 vs 4" and team_name != "" and team_name == other.team_name:
 			continue
 		other.record_touch(self)
 		var impact := (planar_velocity + bump_velocity) * 0.8
@@ -178,7 +181,12 @@ func _resolve_car_bumps() -> void:
 		if blue_shield_time > 0.0:
 			impact *= 0.6
 			damage_multiplier *= 0.6
-		other.receive_bump(impact, damage_multiplier)
+		if GameState.multiplayer_mode and other.network_remote and other.is_bot and not GameState.room_host:
+			remote_bot_hit.emit(int(other.get_meta("network_id", 0)), impact, damage_multiplier)
+		elif GameState.multiplayer_mode and is_bot and GameState.room_host and other.network_remote:
+			remote_player_hit.emit(int(other.get_meta("network_id", 0)), int(get_meta("network_id", 0)), impact, damage_multiplier)
+		else:
+			other.receive_bump(impact, damage_multiplier)
 		if other.blue_shield_time <= 0.0:
 			if rage_time <= 0.0:
 				planar_velocity *= 0.82

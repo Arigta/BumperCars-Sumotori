@@ -29,9 +29,15 @@ var respawn_button: Button
 var respawn_countdown := 0.0
 var respawn_ready := false
 var bots: Array[CharacterBody3D] = []
+var bot_network_ids: Array[int] = []
+var bot_contact_times: Dictionary = {}
 var bot_respawn_timers: Array[float] = []
 var bot_rage_progress: Array[float] = []
 var bot_scores: Array[int] = []
+var bot_kills: Array[int] = []
+var bot_deaths: Array[int] = []
+var bot_assists: Array[int] = []
+var bot_names: Array[String] = []
 var spawn_markers: Array[Marker3D] = []
 var pickups: Array[Area3D] = []
 var pickup_spawn_timer := 3.0
@@ -45,7 +51,7 @@ var player_kills := 0
 var player_deaths := 0
 var player_assists := 0
 var leaderboard_panel: PanelContainer
-var leaderboard_label: Label
+var leaderboard_cells: Array[Label] = []
 var match_clock_label: Label
 
 
@@ -55,20 +61,37 @@ func _ready() -> void:
 		if marker:
 			spawn_markers.append(marker)
 	_build_hud()
-	match_time_left = GameState.room_minutes * 60.0 if GameState.multiplayer_mode else 0.0
+	match_time_left = GameState.match_time_remaining if GameState.multiplayer_mode else 0.0
 	if GameState.player_team != "Spectator" or not GameState.multiplayer_mode:
 		_spawn_player(_available_spawn())
 	if GameState.multiplayer_mode:
+		GameState.lobby_updated.connect(_sync_remote_roster)
 		for id in GameState.lobby_players:
 			var record: Dictionary = GameState.lobby_players[id]
-			if int(id) != multiplayer.get_unique_id() and not bool(record.get("spectator", false)):
+			if bool(record.get("bot", false)) and multiplayer.is_server():
+				var slot := bots.size()
+				bot_network_ids.append(int(id))
+				bots.append(_spawn_bot(_available_spawn(), slot, record))
+				bot_respawn_timers.append(0.0)
+				bot_rage_progress.append(0.0)
+				bot_scores.append(0)
+				bot_kills.append(0)
+				bot_deaths.append(0)
+				bot_assists.append(0)
+				bot_names.append(str(record.get("name", "Bot")))
+			elif int(id) != multiplayer.get_unique_id() and not bool(record.get("spectator", false)):
 				_spawn_remote_player(int(id), record)
 	else:
 		for index in BOT_COUNT:
+			bot_network_ids.append(0)
 			bots.append(_spawn_bot(_available_spawn(), index))
 			bot_respawn_timers.append(0.0)
 			bot_rage_progress.append(0.0)
 			bot_scores.append(0)
+			bot_kills.append(0)
+			bot_deaths.append(0)
+			bot_assists.append(0)
+			bot_names.append(bots[index].display_name)
 	camera_target = player if is_instance_valid(player) else (remote_players.values()[0] if not remote_players.is_empty() else null)
 	follow_camera = Camera3D.new()
 	follow_camera.name = "Follow camera"
@@ -81,6 +104,7 @@ func _ready() -> void:
 	else:
 		follow_camera.global_position = Vector3(0.0, 20.0, 32.0)
 		follow_camera.look_at(Vector3.ZERO)
+	GameState.announce_game_ready()
 
 
 func _process(delta: float) -> void:
@@ -89,6 +113,7 @@ func _process(delta: float) -> void:
 		toast_label.visible = toast_timer > 0.0
 	if GameState.multiplayer_mode and multiplayer.is_server() and match_time_left > 0.0:
 		match_time_left = maxf(0.0, match_time_left - delta)
+		GameState.match_time_remaining = match_time_left
 	if GameState.multiplayer_mode and match_time_left <= 0.0 and not match_over:
 		_set_match_over()
 	if GameState.multiplayer_mode:
@@ -96,6 +121,8 @@ func _process(delta: float) -> void:
 		if network_update_timer <= 0.0:
 			network_update_timer = NETWORK_UPDATE_INTERVAL
 			_send_network_state()
+			if multiplayer.is_server():
+				_send_bot_states()
 	if is_instance_valid(player) and (player.health <= 0.0 or (not player.is_defeated and player.global_position.y < ARENA_FALL_HEIGHT)):
 		_player_fell()
 	if GameState.multiplayer_mode and multiplayer.is_server():
@@ -107,9 +134,14 @@ func _process(delta: float) -> void:
 		var bot := bots[index]
 		if is_instance_valid(bot) and (bot.health <= 0.0 or (not bot.is_defeated and bot.global_position.y < ARENA_FALL_HEIGHT)):
 			bot_rage_progress[index] = maxf(0.0, bot.rage_progress - 10.0)
-			bot_scores[index] = bot.score
 			_award_fall(bot)
+			bot_scores[index] = bot.score
+			bot_kills[index] = bot.kills
+			bot_deaths[index] = bot.deaths
+			bot_assists[index] = bot.assists
 			bot.is_defeated = true
+			if GameState.multiplayer_mode and multiplayer.is_server():
+				_send_bot_state(index)
 			bot.set_collision_layer_value(1, false)
 			bot.set_collision_mask_value(1, false)
 			bot_respawn_timers[index] = BOT_RESPAWN_DELAY
@@ -117,7 +149,9 @@ func _process(delta: float) -> void:
 		elif not is_instance_valid(bot) and bot_respawn_timers[index] > 0.0:
 			bot_respawn_timers[index] -= delta
 			if bot_respawn_timers[index] <= 0.0:
-				bots[index] = _spawn_bot(_available_spawn(), index)
+				var record: Dictionary = GameState.lobby_players.get(bot_network_ids[index], {}) if GameState.multiplayer_mode else {}
+				bots[index] = _spawn_bot(_available_spawn(), index, record)
+				bot_names[index] = bots[index].display_name
 	_assign_bot_targets()
 	for car in _active_cars():
 		if car.add_rage_progress(delta * RAGE_SURVIVAL_RATE) and car == player:
@@ -159,6 +193,8 @@ func _spawn_player(marker: Marker3D) -> CharacterBody3D:
 	car.kills = player_kills
 	car.deaths = player_deaths
 	car.assists = player_assists
+	if GameState.multiplayer_mode:
+		car.remote_bot_hit.connect(_on_remote_bot_hit)
 	_place_car(car, marker)
 	add_child(car)
 	car.name = "PlayerCar"
@@ -172,6 +208,7 @@ func _spawn_remote_player(id: int, record: Dictionary) -> CharacterBody3D:
 	car.model_path = "res://assets/cars/%s.res" % GameState.CAR_NAMES[car_index]
 	car.is_bot = false
 	car.network_remote = true
+	car.is_bot = bool(record.get("bot", false))
 	car.display_name = str(record.get("name", "Pemain"))
 	car.team_name = str(record.get("team", "Biru"))
 	car.set_meta("network_id", id)
@@ -182,6 +219,29 @@ func _spawn_remote_player(id: int, record: Dictionary) -> CharacterBody3D:
 	return car
 
 
+func _sync_remote_roster() -> void:
+	for id in remote_players.keys():
+		var record: Dictionary = GameState.lobby_players.get(id, {})
+		if record.is_empty() or bool(record.get("spectator", false)):
+			var old_car: CharacterBody3D = remote_players[id]
+			remote_players.erase(id)
+			old_car.queue_free()
+	for id in GameState.lobby_players:
+		if int(id) == multiplayer.get_unique_id():
+			continue
+		var record: Dictionary = GameState.lobby_players[id]
+		if bool(record.get("spectator", false)):
+			continue
+		if GameState.room_host and bool(record.get("bot", false)):
+			continue
+		if not remote_players.has(id):
+			_spawn_remote_player(int(id), record)
+		else:
+			var car: CharacterBody3D = remote_players[id]
+			car.display_name = str(record.get("name", "Pemain"))
+			car.team_name = str(record.get("team", "Biru"))
+
+
 func _send_network_state() -> void:
 	if not is_instance_valid(player):
 		return
@@ -190,6 +250,68 @@ func _send_network_state() -> void:
 		_relay_network_state(state)
 	else:
 		_rpc_network_state.rpc_id(1, state)
+
+
+func _send_bot_states() -> void:
+	for index in bots.size():
+		_send_bot_state(index)
+
+
+func _send_bot_state(index: int) -> void:
+	if index >= bot_network_ids.size() or bot_network_ids[index] >= 0:
+		return
+	var bot := bots[index]
+	if not is_instance_valid(bot):
+		return
+	var state := {"id": bot_network_ids[index], "position": bot.global_position, "rotation": bot.rotation.y, "speed": bot.speed, "health": bot.health, "score": bot.score, "kills": bot.kills, "deaths": bot.deaths, "assists": bot.assists, "time_left": match_time_left}
+	for peer_id in GameState.game_ready_peers:
+		_rpc_apply_network_state.rpc_id(int(peer_id), state)
+
+
+func _on_remote_bot_hit(bot_id: int, impact: Vector3, damage_multiplier: float) -> void:
+	if bot_id < 0 and not multiplayer.is_server():
+		var key := "local:%d" % bot_id
+		var now := Time.get_ticks_msec()
+		if now - int(bot_contact_times.get(key, -1000)) < 350:
+			return
+		bot_contact_times[key] = now
+		_rpc_hit_bot.rpc_id(1, bot_id, impact, damage_multiplier)
+
+
+@rpc("any_peer", "call_remote", "reliable")
+func _rpc_hit_bot(bot_id: int, impact: Vector3, damage_multiplier: float) -> void:
+	if not multiplayer.is_server():
+		return
+	var sender := multiplayer.get_remote_sender_id()
+	var slot := bot_network_ids.find(bot_id)
+	if not remote_players.has(sender) or slot < 0 or not is_instance_valid(bots[slot]):
+		return
+	var bot := bots[slot]
+	var attacker: CharacterBody3D = remote_players[sender]
+	if bot.is_defeated or attacker.global_position.distance_to(bot.global_position) > 7.0:
+		return
+	bot.record_touch(attacker)
+	bot.receive_bump(impact.limit_length(45.0), clampf(damage_multiplier, 0.0, 2.0))
+
+
+func _on_bot_remote_player_hit(peer_id: int, bot_id: int, impact: Vector3, damage_multiplier: float) -> void:
+	if peer_id <= 1 or not multiplayer.is_server():
+		return
+	var key := "%d:%d" % [peer_id, bot_id]
+	var now := Time.get_ticks_msec()
+	if now - int(bot_contact_times.get(key, -1000)) < 350:
+		return
+	bot_contact_times[key] = now
+	if GameState.game_ready_peers.has(peer_id):
+		_rpc_apply_bot_hit.rpc_id(peer_id, bot_id, impact, damage_multiplier)
+
+
+@rpc("authority", "call_remote", "reliable")
+func _rpc_apply_bot_hit(bot_id: int, impact: Vector3, damage_multiplier: float) -> void:
+	if not is_instance_valid(player) or not remote_players.has(bot_id):
+		return
+	player.record_touch(remote_players[bot_id])
+	player.receive_bump(impact, damage_multiplier)
 
 
 @rpc("any_peer", "call_remote", "unreliable_ordered")
@@ -217,8 +339,8 @@ func _relay_network_state(state: Dictionary) -> void:
 		state["kills"] = authoritative_car.kills
 		state["deaths"] = authoritative_car.deaths
 		state["assists"] = authoritative_car.assists
-	for id in multiplayer.get_peers():
-		_rpc_apply_network_state.rpc_id(int(id), state)
+	for peer_id in GameState.game_ready_peers:
+		_rpc_apply_network_state.rpc_id(int(peer_id), state)
 
 
 @rpc("authority", "call_remote", "unreliable_ordered")
@@ -228,7 +350,7 @@ func _rpc_apply_network_state(state: Dictionary) -> void:
 
 func _apply_network_state(state: Dictionary) -> void:
 	var id := int(state.get("id", -1))
-	if id == 1:
+	if id == 1 or id < 0:
 		match_time_left = float(state.get("time_left", match_time_left))
 	if id == multiplayer.get_unique_id():
 		player_score = int(state.get("score", player_score))
@@ -256,18 +378,31 @@ func _apply_network_state(state: Dictionary) -> void:
 	car.deaths = int(state.get("deaths", 0))
 	car.assists = int(state.get("assists", 0))
 	car.is_defeated = car.health <= 0.0 or car.global_position.y < ARENA_FALL_HEIGHT
+	car.visible = not car.is_defeated
 
 
-func _spawn_bot(marker: Marker3D, slot: int) -> CharacterBody3D:
+func _spawn_bot(marker: Marker3D, slot: int, record: Dictionary = {}) -> CharacterBody3D:
 	var car = PLAYER_CAR.new()
-	var model_names: Array = GameState.CAR_NAMES.duplicate()
-	model_names.erase(GameState.selected_name())
-	var model_name: String = model_names[randi() % model_names.size()]
+	var model_name := ""
+	if record.is_empty():
+		var model_names: Array = GameState.CAR_NAMES.duplicate()
+		model_names.erase(GameState.selected_name())
+		model_name = str(model_names[randi() % model_names.size()])
+	else:
+		var car_index := clampi(int(record.get("car", 0)), 0, GameState.CAR_NAMES.size() - 1)
+		model_name = GameState.CAR_NAMES[car_index]
 	car.model_path = "res://assets/cars/%s.res" % model_name
 	car.is_bot = true
-	car.display_name = model_name
+	car.display_name = str(record.get("name", model_name))
+	car.team_name = str(record.get("team", "")) if GameState.multiplayer_mode else ""
+	if slot < bot_network_ids.size() and bot_network_ids[slot] < 0:
+		car.set_meta("network_id", bot_network_ids[slot])
+		car.remote_player_hit.connect(_on_bot_remote_player_hit)
 	car.rage_progress = bot_rage_progress[slot] if slot < bot_rage_progress.size() else 0.0
 	car.score = bot_scores[slot] if slot < bot_scores.size() else 0
+	car.kills = bot_kills[slot] if slot < bot_kills.size() else 0
+	car.deaths = bot_deaths[slot] if slot < bot_deaths.size() else 0
+	car.assists = bot_assists[slot] if slot < bot_assists.size() else 0
 	_place_car(car, marker)
 	add_child(car)
 	car.name = "BotCar_%d" % (bots.size() + 1)
@@ -429,19 +564,48 @@ func _build_hud() -> void:
 	canvas.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	layer.add_child(canvas)
 	_build_defeat_panel(canvas)
-	var board := _make_hud_panel(canvas, Vector2(0, 0), Vector2(0, 0))
-	board.position = Vector2(18, 18)
+	leaderboard_panel = _make_hud_panel(canvas, Vector2(0, 0), Vector2.ZERO)
+	leaderboard_panel.offset_left = 18
+	leaderboard_panel.offset_right = 258
+	leaderboard_panel.offset_top = 18
+	leaderboard_panel.offset_bottom = 222
 	var board_content := VBoxContainer.new()
-	board_content.add_theme_constant_override("separation", 4)
-	board.add_child(board_content)
+	board_content.add_theme_constant_override("separation", 6)
+	leaderboard_panel.add_child(board_content)
 	var title := Label.new()
-	title.text = "PERINGKAT • KDA • SKOR"
+	title.text = "LEADERBOARD"
 	title.add_theme_color_override("font_color", Color("f4bb3b"))
-	title.add_theme_font_size_override("font_size", 15)
+	title.add_theme_font_size_override("font_size", 13)
 	board_content.add_child(title)
-	leaderboard_label = Label.new()
-	leaderboard_label.add_theme_font_size_override("font_size", 13)
-	board_content.add_child(leaderboard_label)
+	var grid := GridContainer.new()
+	grid.columns = 5
+	grid.add_theme_constant_override("h_separation", 6)
+	grid.add_theme_constant_override("v_separation", 3)
+	board_content.add_child(grid)
+	for heading in ["#", "PEMAIN", "K", "D", "A"]:
+		var header := Label.new()
+		header.text = heading
+		header.add_theme_font_size_override("font_size", 10)
+		header.add_theme_color_override("font_color", Color("9aa5af"))
+		if heading == "PEMAIN":
+			header.custom_minimum_size.x = 110
+		else:
+			header.custom_minimum_size.x = 20
+			header.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		grid.add_child(header)
+	for row in 8:
+		for column in 5:
+			var cell := Label.new()
+			cell.add_theme_font_size_override("font_size", 11)
+			cell.add_theme_color_override("font_color", Color("f4bb3b") if column == 2 else Color("e5ebf0"))
+			if column == 1:
+				cell.custom_minimum_size.x = 110
+				cell.clip_text = true
+			else:
+				cell.custom_minimum_size.x = 20
+				cell.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+			grid.add_child(cell)
+			leaderboard_cells.append(cell)
 	var speed_panel := _make_hud_panel(canvas, Vector2(0, 1), Vector2(18, -18))
 	speed_panel.anchor_top = 1.0
 	speed_panel.anchor_bottom = 1.0
@@ -508,10 +672,12 @@ func _build_hud() -> void:
 	menu_button.text = "MENU  (Esc)"
 	menu_button.anchor_left = 1.0
 	menu_button.anchor_right = 1.0
+	menu_button.anchor_top = 1.0
+	menu_button.anchor_bottom = 1.0
 	menu_button.offset_left = -156.0
 	menu_button.offset_right = -18.0
-	menu_button.offset_top = 18.0
-	menu_button.offset_bottom = 58.0
+	menu_button.offset_top = -58.0
+	menu_button.offset_bottom = -18.0
 	menu_button.pressed.connect(_return_to_menu)
 	canvas.add_child(menu_button)
 	match_clock_label = Label.new()
@@ -562,17 +728,58 @@ func _make_hud_panel(canvas: Control, anchor: Vector2, offset: Vector2) -> Panel
 
 
 func _update_leaderboard() -> void:
-	if not is_instance_valid(leaderboard_label):
+	if leaderboard_cells.is_empty():
 		return
 	var entries: Array[Dictionary] = []
-	for car in _active_cars():
-		entries.append({"name": car.display_name, "score": car.score, "k": car.kills, "d": car.deaths, "a": car.assists})
-	entries.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return int(a["score"]) > int(b["score"]))
-	var lines := PackedStringArray()
-	for i in mini(5, entries.size()):
-		var e: Dictionary = entries[i]
-		lines.append("%d. %s  %d/%d/%d  •  %d" % [i + 1, e["name"], e["k"], e["d"], e["a"], e["score"]])
-	leaderboard_label.text = "\n".join(lines) if not lines.is_empty() else "Menunggu pemain"
+	if GameState.multiplayer_mode:
+		for id in GameState.lobby_players:
+			var record: Dictionary = GameState.lobby_players[id]
+			if bool(record.get("spectator", false)):
+				continue
+			var name := str(record.get("name", "Pemain"))
+			if int(id) == multiplayer.get_unique_id():
+				var local_car := player if is_instance_valid(player) else fallen_player
+				entries.append(_leaderboard_entry(name, local_car, player_kills, player_deaths, player_assists))
+			elif GameState.room_host and bool(record.get("bot", false)):
+				var slot := bot_network_ids.find(int(id))
+				if slot < 0:
+					continue
+				entries.append(_leaderboard_entry(name, bots[slot], bot_kills[slot], bot_deaths[slot], bot_assists[slot]))
+			else:
+				var remote: Variant = remote_players.get(id)
+				entries.append(_leaderboard_entry(name, remote))
+	else:
+		var local_car := player if is_instance_valid(player) else fallen_player
+		entries.append(_leaderboard_entry(GameState.player_name, local_car, player_kills, player_deaths, player_assists))
+		for index in bots.size():
+			entries.append(_leaderboard_entry(bot_names[index], bots[index], bot_kills[index], bot_deaths[index], bot_assists[index]))
+	entries.sort_custom(_leaderboard_before)
+	for row in 8:
+		var has_entry := row < entries.size()
+		var values := ["", "", "", "", ""]
+		if has_entry:
+			var entry: Dictionary = entries[row]
+			values = [str(row + 1), str(entry["name"]), str(entry["k"]), str(entry["d"]), str(entry["a"])]
+		for column in 5:
+			var cell := leaderboard_cells[row * 5 + column]
+			cell.visible = has_entry
+			cell.text = values[column]
+
+
+func _leaderboard_entry(name: String, car: Variant, kills: int = 0, deaths: int = 0, assists: int = 0) -> Dictionary:
+	if is_instance_valid(car):
+		return {"name": name, "k": car.kills, "d": car.deaths, "a": car.assists}
+	return {"name": name, "k": kills, "d": deaths, "a": assists}
+
+
+func _leaderboard_before(a: Dictionary, b: Dictionary) -> bool:
+	if int(a["k"]) != int(b["k"]):
+		return int(a["k"]) > int(b["k"])
+	if int(a["d"]) != int(b["d"]):
+		return int(a["d"]) < int(b["d"])
+	if int(a["a"]) != int(b["a"]):
+		return int(a["a"]) > int(b["a"])
+	return str(a["name"]) < str(b["name"])
 
 
 func _set_match_over() -> void:
@@ -645,6 +852,8 @@ func _award_fall(victim: CharacterBody3D) -> void:
 			var slot := bots.find(attacker)
 			if slot >= 0:
 				bot_scores[slot] = attacker.score
+				bot_kills[slot] = attacker.kills
+				bot_assists[slot] = attacker.assists
 				bot_rage_progress[slot] = attacker.rage_progress
 
 

@@ -14,7 +14,11 @@ var player_team := "Biru"
 var player_ready := false
 var room_host := false
 var room_name := ""
+var match_active := false
+var match_time_remaining := 0.0
 var lobby_players: Dictionary = {}
+var next_bot_id := -1
+var game_ready_peers: Dictionary = {}
 var peer: ENetMultiplayerPeer
 var discovery := PacketPeerUDP.new()
 var discovery_server := UDPServer.new()
@@ -27,6 +31,9 @@ func _process(delta: float) -> void:
 	if discovery_timer <= 0.0:
 		discovery_timer = 1.0
 		_broadcast_room()
+		for address in discovery_results.keys():
+			if Time.get_ticks_msec() - int(discovery_results[address].get("_seen_at", 0)) > 3500:
+				discovery_results.erase(address)
 	_poll_discovery()
 
 
@@ -48,7 +55,11 @@ func host_room(port: int = 27890) -> Error:
 	multiplayer.multiplayer_peer = peer
 	room_host = true
 	multiplayer_mode = true
+	match_active = false
+	match_time_remaining = room_minutes * 60.0
 	lobby_players.clear()
+	game_ready_peers.clear()
+	next_bot_id = -1
 	lobby_players[1] = _local_player_record()
 	multiplayer.peer_connected.connect(_on_peer_connected)
 	multiplayer.peer_disconnected.connect(_on_peer_disconnected)
@@ -67,6 +78,7 @@ func join_room(address: String, port: int = 27890) -> Error:
 	multiplayer.multiplayer_peer = peer
 	room_host = false
 	multiplayer_mode = true
+	match_active = false
 	multiplayer.connected_to_server.connect(_on_connected)
 	multiplayer.connection_failed.connect(_on_connection_failed)
 	multiplayer.server_disconnected.connect(_on_server_disconnected)
@@ -98,7 +110,11 @@ func close_room() -> void:
 	peer = null
 	room_host = false
 	multiplayer_mode = false
+	match_active = false
+	match_time_remaining = 0.0
 	lobby_players.clear()
+	game_ready_peers.clear()
+	next_bot_id = -1
 
 
 func _local_player_record() -> Dictionary:
@@ -108,7 +124,8 @@ func _local_player_record() -> Dictionary:
 func _on_peer_connected(id: int) -> void:
 	if not room_host:
 		return
-	_rpc_send_roster.rpc_id(id, lobby_players, _room_settings())
+	# The full roster is sent after the new peer registers its car and name.
+	pass
 
 
 func _on_connected() -> void:
@@ -127,14 +144,31 @@ func _on_server_disconnected() -> void:
 
 func _on_peer_disconnected(id: int) -> void:
 	lobby_players.erase(id)
+	game_ready_peers.erase(id)
 	_broadcast_roster()
+
+
+func announce_game_ready() -> void:
+	if multiplayer_mode and not room_host:
+		_rpc_game_ready.rpc_id(1)
+
+
+@rpc("any_peer", "call_remote", "reliable")
+func _rpc_game_ready() -> void:
+	if room_host:
+		var id := multiplayer.get_remote_sender_id()
+		if lobby_players.has(id):
+			game_ready_peers[id] = true
 
 
 @rpc("any_peer", "reliable")
 func _register_player(record: Dictionary) -> void:
-	if not room_host or lobby_players.size() >= 8:
+	if not room_host:
 		return
 	var id := multiplayer.get_remote_sender_id()
+	if lobby_players.size() >= 8:
+		peer.disconnect_peer(id)
+		return
 	var clean := record.duplicate()
 	clean["name"] = str(clean.get("name", "Pemain")).left(20)
 	clean["car"] = clampi(int(clean.get("car", 0)), 0, CAR_NAMES.size() - 1)
@@ -143,6 +177,7 @@ func _register_player(record: Dictionary) -> void:
 		clean["team"] = "Spectator"
 	clean["spectator"] = clean["team"] == "Spectator"
 	clean["ready"] = false
+	clean["bot"] = false
 	lobby_players[id] = clean
 	_broadcast_roster()
 
@@ -159,6 +194,7 @@ func _update_local_record(record: Dictionary) -> void:
 			current.merge(record, true)
 			current["team"] = requested_team
 			current["spectator"] = requested_team == "Spectator"
+			current["bot"] = false
 			lobby_players[id] = current
 			_broadcast_roster()
 	else:
@@ -176,7 +212,14 @@ func _rpc_send_roster(roster: Dictionary, settings: Dictionary) -> void:
 	room_name = str(settings.get("name", "Room LAN"))
 	room_mode = str(settings.get("mode", "Deathmatch"))
 	room_minutes = int(settings.get("minutes", 5))
+	match_active = bool(settings.get("playing", false))
+	match_time_remaining = float(settings.get("time_left", room_minutes * 60.0))
+	if lobby_players.has(multiplayer.get_unique_id()):
+		var own_record: Dictionary = lobby_players[multiplayer.get_unique_id()]
+		player_team = str(own_record.get("team", "Biru"))
 	lobby_updated.emit()
+	if match_active and lobby_players.has(multiplayer.get_unique_id()):
+		match_started.emit()
 
 
 func update_lobby_record() -> void:
@@ -196,10 +239,10 @@ func _broadcast_roster() -> void:
 
 
 func _room_settings() -> Dictionary:
-	return {"name": room_name, "mode": room_mode, "minutes": room_minutes}
+	return {"name": room_name, "mode": room_mode, "minutes": room_minutes, "playing": match_active, "time_left": match_time_remaining}
 
 
-func _team_count(team: String, except_id: int = -1) -> int:
+func _team_count(team: String, except_id: int = 0) -> int:
 	var count := 0
 	for id in lobby_players:
 		if int(id) != except_id and str(lobby_players[id].get("team", "")) == team:
@@ -207,8 +250,29 @@ func _team_count(team: String, except_id: int = -1) -> int:
 	return count
 
 
+func add_bot() -> void:
+	if not room_host or match_active or lobby_players.size() >= 8:
+		return
+	var id := next_bot_id
+	next_bot_id -= 1
+	var team := "Biru"
+	if room_mode == "Tim 4 vs 4":
+		team = "Biru" if _team_count("Biru") <= _team_count("Oranye") else "Oranye"
+		if _team_count(team) >= 4:
+			team = "Oranye" if team == "Biru" else "Biru"
+	var number := -id
+	lobby_players[id] = {"name": "Bot %d" % number, "car": randi() % CAR_NAMES.size(), "team": team, "ready": true, "spectator": false, "bot": true}
+	_broadcast_roster()
+
+
+func remove_bot(id: int) -> void:
+	if room_host and not match_active and id < 0 and lobby_players.has(id):
+		lobby_players.erase(id)
+		_broadcast_roster()
+
+
 func start_room_match() -> void:
-	if not room_host:
+	if not room_host or match_active:
 		return
 	var ready_count := 0
 	for record in lobby_players.values():
@@ -216,12 +280,21 @@ func start_room_match() -> void:
 			ready_count += 1
 	if lobby_players.size() < 2 or ready_count < lobby_players.size():
 		return
+	match_active = true
+	match_time_remaining = room_minutes * 60.0
 	_rpc_begin_match.rpc()
-
-
-@rpc("authority", "call_local", "reliable")
-func _rpc_begin_match() -> void:
 	match_started.emit()
+
+
+@rpc("authority", "call_remote", "reliable")
+func _rpc_begin_match() -> void:
+	match_active = true
+	match_started.emit()
+
+
+func kick_player(id: int) -> void:
+	if room_host and id > 1 and lobby_players.has(id) and peer != null:
+		peer.disconnect_peer(id)
 
 
 func _start_discovery(port: int) -> void:
@@ -248,7 +321,7 @@ func scan_rooms() -> void:
 
 func _broadcast_room() -> void:
 	if room_host and peer != null:
-		var packet := JSON.stringify({"room": room_name, "mode": room_mode, "minutes": room_minutes, "players": lobby_players.size(), "port": 27890})
+		var packet := JSON.stringify({"room": room_name, "mode": room_mode, "minutes": room_minutes, "players": lobby_players.size(), "port": 27890, "status": "Playing" if match_active else "Waiting"})
 		discovery.put_packet(packet.to_utf8_buffer())
 
 
@@ -257,7 +330,8 @@ func _poll_discovery() -> void:
 	while discovery_server.is_connection_available():
 		var connection := discovery_server.take_connection()
 		while connection.get_available_packet_count() > 0:
-			var packet := JSON.parse_string(connection.get_packet().get_string_from_utf8())
-			if packet is Dictionary and int(packet.get("players", 8)) < 8:
+			var packet: Variant = JSON.parse_string(connection.get_packet().get_string_from_utf8())
+			if packet is Dictionary:
 				packet["address"] = connection.get_packet_ip()
+				packet["_seen_at"] = Time.get_ticks_msec()
 				discovery_results[packet["address"]] = packet
