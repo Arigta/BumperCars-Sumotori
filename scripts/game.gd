@@ -9,6 +9,7 @@ const PICKUP_TYPES := ["blue_shield", "unlimited_nos", "jump"]
 const RAGE_SURVIVAL_RATE := 1.2
 const KILL_POINTS := 30.0
 const ASSIST_POINTS := 10.0
+const NETWORK_UPDATE_INTERVAL := 0.05
 
 var player: CharacterBody3D
 var fallen_player: CharacterBody3D
@@ -36,36 +37,72 @@ var pickups: Array[Area3D] = []
 var pickup_spawn_timer := 3.0
 var player_rage_progress := 0.0
 var player_score := 0
+var remote_players: Dictionary = {}
+var network_update_timer := 0.0
+var match_time_left := 0.0
+var match_over := false
+var player_kills := 0
+var player_deaths := 0
+var player_assists := 0
+var leaderboard_panel: PanelContainer
+var leaderboard_label: Label
+var match_clock_label: Label
 
 
 func _ready() -> void:
-	for index in 4:
+	for index in 8:
 		var marker := get_node_or_null("Arena/CarSpawn_%d" % (index + 1)) as Marker3D
 		if marker:
 			spawn_markers.append(marker)
 	_build_hud()
-	_spawn_player(_available_spawn())
-	for index in BOT_COUNT:
-		bots.append(_spawn_bot(_available_spawn(), index))
-		bot_respawn_timers.append(0.0)
-		bot_rage_progress.append(0.0)
-		bot_scores.append(0)
-	camera_target = player
+	match_time_left = GameState.room_minutes * 60.0 if GameState.multiplayer_mode else 0.0
+	if GameState.player_team != "Spectator" or not GameState.multiplayer_mode:
+		_spawn_player(_available_spawn())
+	if GameState.multiplayer_mode:
+		for id in GameState.lobby_players:
+			var record: Dictionary = GameState.lobby_players[id]
+			if int(id) != multiplayer.get_unique_id() and not bool(record.get("spectator", false)):
+				_spawn_remote_player(int(id), record)
+	else:
+		for index in BOT_COUNT:
+			bots.append(_spawn_bot(_available_spawn(), index))
+			bot_respawn_timers.append(0.0)
+			bot_rage_progress.append(0.0)
+			bot_scores.append(0)
+	camera_target = player if is_instance_valid(player) else (remote_players.values()[0] if not remote_players.is_empty() else null)
 	follow_camera = Camera3D.new()
 	follow_camera.name = "Follow camera"
 	follow_camera.fov = 72.0
 	follow_camera.current = true
 	add_child(follow_camera)
-	follow_camera.global_position = player.global_position + player.global_basis * Vector3(0.0, 5.5, 10.0)
-	follow_camera.look_at(player.global_position + Vector3.UP * 1.2)
+	if is_instance_valid(camera_target):
+		follow_camera.global_position = camera_target.global_position + camera_target.global_basis * Vector3(0.0, 5.5, 10.0)
+		follow_camera.look_at(camera_target.global_position + Vector3.UP * 1.2)
+	else:
+		follow_camera.global_position = Vector3(0.0, 20.0, 32.0)
+		follow_camera.look_at(Vector3.ZERO)
 
 
 func _process(delta: float) -> void:
 	if toast_timer > 0.0:
 		toast_timer -= delta
 		toast_label.visible = toast_timer > 0.0
+	if GameState.multiplayer_mode and multiplayer.is_server() and match_time_left > 0.0:
+		match_time_left = maxf(0.0, match_time_left - delta)
+	if GameState.multiplayer_mode and match_time_left <= 0.0 and not match_over:
+		_set_match_over()
+	if GameState.multiplayer_mode:
+		network_update_timer -= delta
+		if network_update_timer <= 0.0:
+			network_update_timer = NETWORK_UPDATE_INTERVAL
+			_send_network_state()
 	if is_instance_valid(player) and (player.health <= 0.0 or (not player.is_defeated and player.global_position.y < ARENA_FALL_HEIGHT)):
 		_player_fell()
+	if GameState.multiplayer_mode and multiplayer.is_server():
+		for remote in remote_players.values():
+			if is_instance_valid(remote) and not remote.is_defeated and (remote.health <= 0.0 or remote.global_position.y < ARENA_FALL_HEIGHT):
+				_award_fall(remote)
+				remote.is_defeated = true
 	for index in bots.size():
 		var bot := bots[index]
 		if is_instance_valid(bot) and (bot.health <= 0.0 or (not bot.is_defeated and bot.global_position.y < ARENA_FALL_HEIGHT)):
@@ -89,6 +126,10 @@ func _process(delta: float) -> void:
 	_update_spectator_target()
 	_update_camera(delta)
 	_update_player_hud()
+	_update_leaderboard()
+	if is_instance_valid(match_clock_label):
+		match_clock_label.visible = GameState.multiplayer_mode
+		match_clock_label.text = "%02d:%02d" % [int(match_time_left) / 60, int(match_time_left) % 60]
 	if respawn_countdown > 0.0:
 		respawn_countdown = maxf(0.0, respawn_countdown - delta)
 		if respawn_countdown <= 0.0:
@@ -104,21 +145,117 @@ func _unhandled_input(event: InputEvent) -> void:
 		if is_instance_valid(player):
 			player.activate_jump()
 	elif event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE and is_instance_valid(defeat_overlay) and not defeat_overlay.visible:
-		get_tree().change_scene_to_file("res://scenes/main_menu.tscn")
+		_return_to_menu()
 
 
 func _spawn_player(marker: Marker3D) -> CharacterBody3D:
 	var car = PLAYER_CAR.new()
 	car.model_path = GameState.selected_asset_path()
 	car.is_bot = false
-	car.display_name = GameState.selected_name()
+	car.display_name = GameState.player_name
+	car.team_name = GameState.player_team if GameState.multiplayer_mode else ""
 	car.rage_progress = player_rage_progress
 	car.score = player_score
+	car.kills = player_kills
+	car.deaths = player_deaths
+	car.assists = player_assists
 	_place_car(car, marker)
 	add_child(car)
 	car.name = "PlayerCar"
 	player = car
 	return car
+
+
+func _spawn_remote_player(id: int, record: Dictionary) -> CharacterBody3D:
+	var car = PLAYER_CAR.new()
+	var car_index := clampi(int(record.get("car", 0)), 0, GameState.CAR_NAMES.size() - 1)
+	car.model_path = "res://assets/cars/%s.res" % GameState.CAR_NAMES[car_index]
+	car.is_bot = false
+	car.network_remote = true
+	car.display_name = str(record.get("name", "Pemain"))
+	car.team_name = str(record.get("team", "Biru"))
+	car.set_meta("network_id", id)
+	_place_car(car, _available_spawn())
+	add_child(car)
+	car.name = "RemoteCar_%d" % id
+	remote_players[id] = car
+	return car
+
+
+func _send_network_state() -> void:
+	if not is_instance_valid(player):
+		return
+	var state := {"id": multiplayer.get_unique_id(), "position": player.global_position, "rotation": player.rotation.y, "speed": player.speed, "health": player.health, "score": player.score, "kills": player.kills, "deaths": player.deaths, "assists": player.assists, "time_left": match_time_left}
+	if multiplayer.is_server():
+		_relay_network_state(state)
+	else:
+		_rpc_network_state.rpc_id(1, state)
+
+
+@rpc("any_peer", "call_remote", "unreliable_ordered")
+func _rpc_network_state(state: Dictionary) -> void:
+	if not multiplayer.is_server():
+		return
+	var sender := multiplayer.get_remote_sender_id()
+	if int(state.get("id", -1)) != sender:
+		return
+	if remote_players.has(sender):
+		var remote: CharacterBody3D = remote_players[sender]
+		var reported_position: Vector3 = state.get("position", remote.global_position)
+		if not remote.is_defeated and (float(state.get("health", remote.health)) <= 0.0 or reported_position.y < ARENA_FALL_HEIGHT):
+			_award_fall(remote)
+			remote.is_defeated = true
+	_relay_network_state(state)
+
+
+func _relay_network_state(state: Dictionary) -> void:
+	_apply_network_state(state)
+	var id := int(state.get("id", -1))
+	if id != 1 and remote_players.has(id):
+		var authoritative_car: CharacterBody3D = remote_players[id]
+		state["score"] = authoritative_car.score
+		state["kills"] = authoritative_car.kills
+		state["deaths"] = authoritative_car.deaths
+		state["assists"] = authoritative_car.assists
+	for id in multiplayer.get_peers():
+		_rpc_apply_network_state.rpc_id(int(id), state)
+
+
+@rpc("authority", "call_remote", "unreliable_ordered")
+func _rpc_apply_network_state(state: Dictionary) -> void:
+	_apply_network_state(state)
+
+
+func _apply_network_state(state: Dictionary) -> void:
+	var id := int(state.get("id", -1))
+	if id == 1:
+		match_time_left = float(state.get("time_left", match_time_left))
+	if id == multiplayer.get_unique_id():
+		player_score = int(state.get("score", player_score))
+		player_kills = int(state.get("kills", player_kills))
+		player_deaths = int(state.get("deaths", player_deaths))
+		player_assists = int(state.get("assists", player_assists))
+		if is_instance_valid(player):
+			player.score = int(state.get("score", player.score))
+			player.kills = int(state.get("kills", player.kills))
+			player.deaths = int(state.get("deaths", player.deaths))
+			player.assists = int(state.get("assists", player.assists))
+		return
+	if not remote_players.has(id):
+		var record: Dictionary = GameState.lobby_players.get(id, {"name": "Pemain %d" % id, "car": 0})
+		if bool(record.get("spectator", false)):
+			return
+		_spawn_remote_player(id, record)
+	var car: CharacterBody3D = remote_players[id]
+	car.global_position = state.get("position", car.global_position)
+	car.rotation.y = float(state.get("rotation", car.rotation.y))
+	car.speed = float(state.get("speed", 0.0))
+	car.health = float(state.get("health", 100.0))
+	car.score = int(state.get("score", 0))
+	car.kills = int(state.get("kills", 0))
+	car.deaths = int(state.get("deaths", 0))
+	car.assists = int(state.get("assists", 0))
+	car.is_defeated = car.health <= 0.0 or car.global_position.y < ARENA_FALL_HEIGHT
 
 
 func _spawn_bot(marker: Marker3D, slot: int) -> CharacterBody3D:
@@ -166,6 +303,9 @@ func _active_cars() -> Array[CharacterBody3D]:
 	for bot in bots:
 		if is_instance_valid(bot) and not bot.is_defeated:
 			result.append(bot)
+	for car in remote_players.values():
+		if is_instance_valid(car) and not car.is_defeated:
+			result.append(car)
 	return result
 
 
@@ -190,8 +330,12 @@ func _player_fell() -> void:
 	if not is_instance_valid(player):
 		return
 	player_rage_progress = maxf(0.0, player.rage_progress - 10.0)
-	player_score = player.score
 	_award_fall(player)
+	_send_network_state()
+	player_score = player.score
+	player_kills = player.kills
+	player_deaths = player.deaths
+	player_assists = player.assists
 	player.is_defeated = true
 	player.set_collision_layer_value(1, false)
 	player.set_collision_mask_value(1, false)
@@ -285,56 +429,80 @@ func _build_hud() -> void:
 	canvas.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	layer.add_child(canvas)
 	_build_defeat_panel(canvas)
-
-	var panel := PanelContainer.new()
-	panel.position = Vector2(18.0, 18.0)
-	panel.custom_minimum_size = Vector2(330.0, 0.0)
-	var style := StyleBoxFlat.new()
-	style.bg_color = Color(0.08, 0.10, 0.13, 0.88)
-	style.set_corner_radius_all(10)
-	style.content_margin_left = 16
-	style.content_margin_right = 16
-	style.content_margin_top = 12
-	style.content_margin_bottom = 12
-	panel.add_theme_stylebox_override("panel", style)
-	canvas.add_child(panel)
+	var board := _make_hud_panel(canvas, Vector2(0, 0), Vector2(0, 0))
+	board.position = Vector2(18, 18)
+	var board_content := VBoxContainer.new()
+	board_content.add_theme_constant_override("separation", 4)
+	board.add_child(board_content)
+	var title := Label.new()
+	title.text = "PERINGKAT • KDA • SKOR"
+	title.add_theme_color_override("font_color", Color("f4bb3b"))
+	title.add_theme_font_size_override("font_size", 15)
+	board_content.add_child(title)
+	leaderboard_label = Label.new()
+	leaderboard_label.add_theme_font_size_override("font_size", 13)
+	board_content.add_child(leaderboard_label)
+	var speed_panel := _make_hud_panel(canvas, Vector2(0, 1), Vector2(18, -18))
+	speed_panel.anchor_top = 1.0
+	speed_panel.anchor_bottom = 1.0
+	speed_panel.offset_top = -114
+	speed_panel.offset_bottom = -18
 	var info := VBoxContainer.new()
-	info.add_theme_constant_override("separation", 7)
-	panel.add_child(info)
+	info.add_theme_constant_override("separation", 4)
+	speed_panel.add_child(info)
 	var model_label := Label.new()
-	model_label.text = "MOBIL  %s  •  1 PEMAIN + 3 BOT" % GameState.selected_name()
-	model_label.add_theme_font_size_override("font_size", 18)
+	model_label.text = "%s  •  %s" % [GameState.player_name, GameState.selected_name()]
+	model_label.add_theme_font_size_override("font_size", 14)
 	model_label.add_theme_color_override("font_color", Color("f4bb3b"))
 	info.add_child(model_label)
 	speed_label = Label.new()
-	speed_label.add_theme_font_size_override("font_size", 24)
+	speed_label.add_theme_font_size_override("font_size", 23)
 	info.add_child(speed_label)
 	nos_label = Label.new()
-	nos_label.add_theme_font_size_override("font_size", 15)
+	nos_label.add_theme_font_size_override("font_size", 13)
 	info.add_child(nos_label)
 	ability_status_label = Label.new()
-	ability_status_label.add_theme_font_size_override("font_size", 13)
+	ability_status_label.add_theme_font_size_override("font_size", 12)
 	ability_status_label.add_theme_color_override("font_color", Color("dce2e7"))
 	info.add_child(ability_status_label)
-	var health_title := Label.new()
-	health_title.text = "DARAH"
-	health_title.add_theme_font_size_override("font_size", 13)
-	info.add_child(health_title)
-	health_meter = _make_meter(info, Color("43d17a"))
-	var nos_title := Label.new()
-	nos_title.text = "ENERGI NOS"
-	nos_title.add_theme_font_size_override("font_size", 13)
-	info.add_child(nos_title)
-	nos_meter = _make_meter(info, Color("39bbfa"))
-	var rage_title := Label.new()
-	rage_title.text = "RAGE"
-	rage_title.add_theme_font_size_override("font_size", 13)
-	info.add_child(rage_title)
-	rage_meter = _make_meter(info, Color("ff5148"))
 	score_label = Label.new()
-	score_label.add_theme_font_size_override("font_size", 15)
+	score_label.add_theme_font_size_override("font_size", 14)
 	score_label.add_theme_color_override("font_color", Color("f4bb3b"))
 	info.add_child(score_label)
+	var vitals_panel := _make_hud_panel(canvas, Vector2(1, 0), Vector2(-18, 18))
+	vitals_panel.anchor_left = 1.0
+	vitals_panel.anchor_right = 1.0
+	vitals_panel.offset_left = -302
+	vitals_panel.offset_right = -18
+	var vitals := VBoxContainer.new()
+	vitals.add_theme_constant_override("separation", 4)
+	vitals_panel.add_child(vitals)
+	var health_title := Label.new()
+	health_title.text = "DARAH"
+	health_title.add_theme_font_size_override("font_size", 12)
+	vitals.add_child(health_title)
+	health_meter = _make_meter(vitals, Color("43d17a"))
+	var nos_title := Label.new()
+	nos_title.text = "ENERGI NOS"
+	nos_title.add_theme_font_size_override("font_size", 12)
+	vitals.add_child(nos_title)
+	nos_meter = _make_meter(vitals, Color("39bbfa"))
+	var rage_panel := _make_hud_panel(canvas, Vector2(0.5, 1), Vector2(0, 0))
+	rage_panel.anchor_left = 0.5
+	rage_panel.anchor_right = 0.5
+	rage_panel.offset_left = -180
+	rage_panel.offset_right = 180
+	rage_panel.offset_top = -54
+	rage_panel.offset_bottom = -10
+	var rage_box := VBoxContainer.new()
+	rage_box.add_theme_constant_override("separation", 2)
+	rage_panel.add_child(rage_box)
+	var rage_title := Label.new()
+	rage_title.text = "RAGE"
+	rage_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	rage_title.add_theme_font_size_override("font_size", 11)
+	rage_box.add_child(rage_title)
+	rage_meter = _make_meter(rage_box, Color("ff5148"))
 
 	var menu_button := Button.new()
 	menu_button.text = "MENU  (Esc)"
@@ -344,8 +512,19 @@ func _build_hud() -> void:
 	menu_button.offset_right = -18.0
 	menu_button.offset_top = 18.0
 	menu_button.offset_bottom = 58.0
-	menu_button.pressed.connect(func() -> void: get_tree().change_scene_to_file("res://scenes/main_menu.tscn"))
+	menu_button.pressed.connect(_return_to_menu)
 	canvas.add_child(menu_button)
+	match_clock_label = Label.new()
+	match_clock_label.anchor_left = 0.5
+	match_clock_label.anchor_right = 0.5
+	match_clock_label.offset_left = -80
+	match_clock_label.offset_right = 80
+	match_clock_label.offset_top = 16
+	match_clock_label.offset_bottom = 48
+	match_clock_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	match_clock_label.add_theme_font_size_override("font_size", 24)
+	match_clock_label.add_theme_color_override("font_color", Color("f4bb3b"))
+	canvas.add_child(match_clock_label)
 	toast_label = Label.new()
 	toast_label.anchor_left = 0.2
 	toast_label.anchor_right = 0.8
@@ -360,6 +539,52 @@ func _build_hud() -> void:
 	toast_label.add_theme_constant_override("shadow_offset_y", 2)
 	toast_label.visible = false
 	canvas.add_child(toast_label)
+	_update_leaderboard()
+
+
+func _make_hud_panel(canvas: Control, anchor: Vector2, offset: Vector2) -> PanelContainer:
+	var panel := PanelContainer.new()
+	panel.anchor_left = anchor.x
+	panel.anchor_top = anchor.y
+	panel.anchor_right = anchor.x
+	panel.anchor_bottom = anchor.y
+	panel.position = offset
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.08, 0.10, 0.13, 0.88)
+	style.set_corner_radius_all(9)
+	style.content_margin_left = 12
+	style.content_margin_right = 12
+	style.content_margin_top = 8
+	style.content_margin_bottom = 8
+	panel.add_theme_stylebox_override("panel", style)
+	canvas.add_child(panel)
+	return panel
+
+
+func _update_leaderboard() -> void:
+	if not is_instance_valid(leaderboard_label):
+		return
+	var entries: Array[Dictionary] = []
+	for car in _active_cars():
+		entries.append({"name": car.display_name, "score": car.score, "k": car.kills, "d": car.deaths, "a": car.assists})
+	entries.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return int(a["score"]) > int(b["score"]))
+	var lines := PackedStringArray()
+	for i in mini(5, entries.size()):
+		var e: Dictionary = entries[i]
+		lines.append("%d. %s  %d/%d/%d  •  %d" % [i + 1, e["name"], e["k"], e["d"], e["a"], e["score"]])
+	leaderboard_label.text = "\n".join(lines) if not lines.is_empty() else "Menunggu pemain"
+
+
+func _set_match_over() -> void:
+	match_over = true
+	for car in _active_cars():
+		car.match_over = true
+	_show_notification("WAKTU HABIS  •  MATCH SELESAI", Color("f4bb3b"))
+
+
+func _return_to_menu() -> void:
+	GameState.close_room()
+	get_tree().change_scene_to_file("res://scenes/main_menu.tscn")
 
 
 func _make_meter(parent: Control, fill_color: Color) -> ProgressBar:
@@ -388,6 +613,7 @@ func _show_notification(message: String, color: Color = Color("f4bb3b")) -> void
 
 
 func _award_fall(victim: CharacterBody3D) -> void:
+	victim.deaths += 1
 	var now := Time.get_ticks_msec()
 	var latest_time := -1
 	var killer: CharacterBody3D
@@ -403,8 +629,11 @@ func _award_fall(victim: CharacterBody3D) -> void:
 			killer = attacker
 	if not is_instance_valid(killer):
 		return
+	killer.kills += 1
 	for attacker in eligible:
 		var points := KILL_POINTS if attacker == killer else ASSIST_POINTS
+		if attacker != killer:
+			attacker.assists += 1
 		attacker.score += int(points)
 		var rage_activated: bool = attacker.add_rage_progress(points)
 		if attacker == player:
@@ -560,5 +789,5 @@ func _build_defeat_panel(parent: Control) -> void:
 	var menu := Button.new()
 	menu.text = "KEMBALI KE MENU"
 	menu.custom_minimum_size.y = 44
-	menu.pressed.connect(func() -> void: get_tree().change_scene_to_file("res://scenes/main_menu.tscn"))
+	menu.pressed.connect(_return_to_menu)
 	layout.add_child(menu)

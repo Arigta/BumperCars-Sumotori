@@ -17,6 +17,9 @@ const MAX_MARKS := 420
 var model_path := ""
 var display_name := ""
 var is_bot := false
+var network_remote := false
+var team_name := ""
+var match_over := false
 var ai_target: Node3D
 var speed := 0.0
 var nos_energy := NOS_MAX_ENERGY
@@ -28,6 +31,9 @@ var jump_charges := 0
 var rage_progress := 0.0
 var rage_time := 0.0
 var score := 0
+var kills := 0
+var deaths := 0
+var assists := 0
 var recent_attackers: Dictionary = {}
 var bot_jump_cooldown := 3.0
 var is_drifting := false
@@ -67,6 +73,12 @@ func _ready() -> void:
 
 
 func _physics_process(delta: float) -> void:
+	if network_remote:
+		return
+	if match_over:
+		velocity = Vector3.ZERO
+		move_and_slide()
+		return
 	hit_cooldown = maxf(0.0, hit_cooldown - delta)
 	blue_shield_time = maxf(0.0, blue_shield_time - delta)
 	unlimited_nos_time = maxf(0.0, unlimited_nos_time - delta)
@@ -154,6 +166,8 @@ func _resolve_car_bumps() -> void:
 		var collision := get_slide_collision(index)
 		var other := collision.get_collider()
 		if not other is CharacterBody3D or other == self or not other.has_method("receive_bump"):
+			continue
+		if GameState.multiplayer_mode and team_name != "" and team_name == other.team_name:
 			continue
 		other.record_touch(self)
 		var impact := (planar_velocity + bump_velocity) * 0.8

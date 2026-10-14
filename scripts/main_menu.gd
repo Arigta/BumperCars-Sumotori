@@ -1,211 +1,266 @@
 extends Control
 
-var main_panel: PanelContainer
-var selection_panel: PanelContainer
-var selected_label: Label
-var car_buttons: Array[Button] = []
-var preview_car: Node3D
-var preview_mesh: MeshInstance3D
+var root_box: VBoxContainer
+var name_input: LineEdit
+var room_name_input: LineEdit
+var address_input: LineEdit
+var mode_option: OptionButton
+var time_option: OptionButton
+var team_option: OptionButton
+var status_label: Label
+var roster_box: VBoxContainer
+var room_list: VBoxContainer
+var menu_car_option: OptionButton
+var ready_button: Button
+var start_button: Button
+var chosen_room := ""
 
 
 func _ready() -> void:
 	_build_ui()
-	_show_main()
+	GameState.lobby_updated.connect(_refresh_roster)
+	GameState.match_started.connect(_start_match)
+	GameState.network_error.connect(_show_error)
 
 
-func _process(delta: float) -> void:
-	if preview_car and selection_panel.visible:
-		preview_car.rotation.y += delta * 0.55
+func _process(_delta: float) -> void:
+	if room_list and room_list.visible:
+		_refresh_rooms()
 
 
 func _build_ui() -> void:
 	var background := ColorRect.new()
 	background.color = Color("171b22")
 	background.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	background.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(background)
-
 	var center := CenterContainer.new()
 	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	add_child(center)
-
-	main_panel = _panel()
-	center.add_child(main_panel)
-	var main_content := _content(main_panel)
-	var title := _label("BUMPER CARS\nSUMOTORI", 42, Color("f4bb3b"))
-	main_content.add_child(title)
-	main_content.add_child(_label("Deathmatch: 1 pemain melawan 3 bot", 18, Color("d2d7dc")))
-	var start_button := _button("MULAI", 24)
-	start_button.pressed.connect(_show_selection)
-	main_content.add_child(start_button)
-	main_content.add_child(_label("WASD bergerak  •  Shift drift  •  Klik kanan NOS  •  Space lompat", 15, Color("9aa5af")))
-
-	selection_panel = _panel()
-	selection_panel.custom_minimum_size = Vector2(920, 0)
-	center.add_child(selection_panel)
-	var select_content := _content(selection_panel)
-	select_content.add_child(_label("PILIH MOBIL", 32, Color("f4bb3b")))
-	select_content.add_child(_label("Pilih mobilmu. Tiga bot memakai model acak.", 17, Color("d2d7dc")))
-	var columns := HBoxContainer.new()
-	columns.add_theme_constant_override("separation", 22)
-	select_content.add_child(columns)
-	var chooser := VBoxContainer.new()
-	chooser.add_theme_constant_override("separation", 14)
-	columns.add_child(chooser)
-	var grid := GridContainer.new()
-	grid.columns = 2
-	grid.add_theme_constant_override("h_separation", 12)
-	grid.add_theme_constant_override("v_separation", 10)
-	chooser.add_child(grid)
-	for i in GameState.CAR_NAMES.size():
-		var button := _button(_display_name(GameState.CAR_NAMES[i]), 18)
-		button.custom_minimum_size = Vector2(190, 48)
-		button.pressed.connect(_select_car.bind(i))
-		grid.add_child(button)
-		car_buttons.append(button)
-	selected_label = _label("", 18, Color("f4bb3b"))
-	chooser.add_child(selected_label)
-	var play_button := _button("MASUK ARENA", 22)
-	play_button.pressed.connect(_enter_arena)
-	chooser.add_child(play_button)
-	var back_button := _button("Kembali", 16)
-	back_button.pressed.connect(_show_main)
-	chooser.add_child(back_button)
-	_build_car_preview(columns)
-	_select_car(GameState.selected_car)
-
-
-func _build_car_preview(parent: HBoxContainer) -> void:
-	var preview_column := VBoxContainer.new()
-	preview_column.custom_minimum_size = Vector2(405, 0)
-	preview_column.add_theme_constant_override("separation", 12)
-	parent.add_child(preview_column)
-	preview_column.add_child(_label("PRATINJAU MOBIL  •  ROTASI OTOMATIS", 16, Color("d2d7dc")))
-
-	var container := SubViewportContainer.new()
-	container.custom_minimum_size = Vector2(405, 300)
-	container.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	container.stretch = true
-	preview_column.add_child(container)
-
-	var viewport := SubViewport.new()
-	viewport.size = Vector2i(810, 600)
-	viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
-	container.add_child(viewport)
-
-	var world := WorldEnvironment.new()
-	var environment := Environment.new()
-	environment.background_mode = Environment.BG_COLOR
-	environment.background_color = Color("171b22")
-	environment.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	environment.ambient_light_color = Color("c5cbd2")
-	environment.ambient_light_energy = 0.8
-	world.environment = environment
-	viewport.add_child(world)
-
-	var stage := Node3D.new()
-	viewport.add_child(stage)
-	preview_car = Node3D.new()
-	preview_car.position.y = 0.55
-	stage.add_child(preview_car)
-	preview_mesh = MeshInstance3D.new()
-	preview_mesh.position.y = -0.55
-	preview_car.add_child(preview_mesh)
-
-	var camera := Camera3D.new()
-	camera.position = Vector3(4.3, 2.6, 6.2)
-	camera.fov = 38.0
-	camera.current = true
-	stage.add_child(camera)
-	camera.look_at(Vector3(0.0, 0.52, 0.0), Vector3.UP)
-
-	var key_light := DirectionalLight3D.new()
-	key_light.rotation_degrees = Vector3(-36.0, -32.0, 0.0)
-	key_light.light_energy = 1.5
-	stage.add_child(key_light)
-	var fill_light := DirectionalLight3D.new()
-	fill_light.rotation_degrees = Vector3(-18.0, 145.0, 0.0)
-	fill_light.light_energy = 0.7
-	stage.add_child(fill_light)
-
-	var style := StyleBoxFlat.new()
-	style.bg_color = Color("171b22")
-	style.border_color = Color("55616e")
-	style.set_border_width_all(1)
-	style.set_corner_radius_all(10)
-	container.add_theme_stylebox_override("panel", style)
-
-
-func _panel() -> PanelContainer:
 	var panel := PanelContainer.new()
-	panel.custom_minimum_size = Vector2(470, 0)
-	var style := StyleBoxFlat.new()
-	style.bg_color = Color("252c35")
-	style.border_color = Color("55616e")
-	style.set_border_width_all(2)
-	style.set_corner_radius_all(16)
-	style.content_margin_left = 28
-	style.content_margin_right = 28
-	style.content_margin_top = 26
-	style.content_margin_bottom = 26
-	panel.add_theme_stylebox_override("panel", style)
-	return panel
+	panel.custom_minimum_size = Vector2(650, 580)
+	center.add_child(panel)
+	var scroll := ScrollContainer.new()
+	scroll.custom_minimum_size = Vector2(650, 560)
+	panel.add_child(scroll)
+	root_box = VBoxContainer.new()
+	root_box.add_theme_constant_override("separation", 14)
+	root_box.custom_minimum_size.x = 600
+	scroll.add_child(root_box)
+	var title := _label("BUMPER CARS\nSUMOTORI", 38, Color("f4bb3b"))
+	root_box.add_child(title)
+	root_box.add_child(_label("Deathmatch • Arena Colosseum", 17, Color("d2d7dc")))
+	name_input = LineEdit.new()
+	name_input.placeholder_text = "Nama pemain"
+	name_input.text = GameState.player_name
+	root_box.add_child(name_input)
+	menu_car_option = OptionButton.new()
+	for car_name in GameState.CAR_NAMES:
+		menu_car_option.add_item(car_name)
+	menu_car_option.selected = GameState.selected_car
+	menu_car_option.item_selected.connect(func(index: int) -> void: GameState.selected_car = index)
+	root_box.add_child(menu_car_option)
+	var single := _button("MAIN SINGLE PLAYER", 21)
+	single.pressed.connect(_start_single)
+	root_box.add_child(single)
+	var lan := _button("MULTIPLAYER LAN", 21)
+	lan.pressed.connect(_show_lan)
+	root_box.add_child(lan)
+	root_box.add_child(_label("WASD bergerak • Shift drift • Klik kanan NOS • Space lompat", 14, Color("9aa5af")))
+	_build_lan_controls()
+	_build_waiting_room()
 
 
-func _content(panel: PanelContainer) -> VBoxContainer:
-	var box := VBoxContainer.new()
-	box.add_theme_constant_override("separation", 18)
-	panel.add_child(box)
-	return box
+func _build_lan_controls() -> void:
+	var section := VBoxContainer.new()
+	section.name = "LanPanel"
+	section.add_theme_constant_override("separation", 10)
+	root_box.add_child(section)
+	section.add_child(_label("ROOM MULTIPLAYER", 23, Color("f4bb3b")))
+	room_name_input = LineEdit.new()
+	room_name_input.placeholder_text = "Nama room"
+	room_name_input.text = "%s's Room" % GameState.player_name
+	section.add_child(room_name_input)
+	mode_option = OptionButton.new()
+	mode_option.add_item("Deathmatch")
+	mode_option.add_item("Tim 4 vs 4")
+	section.add_child(mode_option)
+	time_option = OptionButton.new()
+	for minutes in [5, 10, 15]:
+		time_option.add_item("%d menit" % minutes)
+	section.add_child(time_option)
+	var host := _button("BUAT ROOM", 18)
+	host.pressed.connect(_host_room)
+	section.add_child(host)
+	address_input = LineEdit.new()
+	address_input.placeholder_text = "IP host (contoh 192.168.1.10)"
+	section.add_child(address_input)
+	var join := _button("GABUNG DENGAN IP", 18)
+	join.pressed.connect(_join_address)
+	section.add_child(join)
+	section.add_child(_label("ROOM TERSEDIA DI JARINGAN", 16, Color("d2d7dc")))
+	room_list = VBoxContainer.new()
+	section.add_child(room_list)
+	section.visible = false
 
 
-func _label(value: String, font_size: int, color: Color) -> Label:
+func _build_waiting_room() -> void:
+	var waiting := VBoxContainer.new()
+	waiting.name = "WaitingPanel"
+	waiting.add_theme_constant_override("separation", 10)
+	root_box.add_child(waiting)
+	waiting.add_child(_label("LOBBY ROOM", 23, Color("f4bb3b")))
+	var car_title := _label("PILIH MOBIL", 16, Color("d2d7dc"))
+	waiting.add_child(car_title)
+	var car_select := OptionButton.new()
+	for car_name in GameState.CAR_NAMES:
+		car_select.add_item(car_name)
+	car_select.selected = GameState.selected_car
+	car_select.item_selected.connect(func(index: int) -> void: GameState.selected_car = index; GameState.update_lobby_record())
+	waiting.add_child(car_select)
+	team_option = OptionButton.new()
+	for team in ["Biru", "Oranye", "Spectator"]:
+		team_option.add_item(team)
+	team_option.item_selected.connect(_team_changed)
+	waiting.add_child(team_option)
+	roster_box = VBoxContainer.new()
+	waiting.add_child(roster_box)
+	status_label = _label("Menunggu pemain...", 15, Color("d2d7dc"))
+	waiting.add_child(status_label)
+	ready_button = _button("SIAP", 18)
+	ready_button.pressed.connect(_toggle_ready)
+	waiting.add_child(ready_button)
+	start_button = _button("MULAI MATCH", 20)
+	start_button.pressed.connect(GameState.start_room_match)
+	waiting.add_child(start_button)
+	var leave := _button("KELUAR ROOM", 16)
+	leave.pressed.connect(_leave_room)
+	waiting.add_child(leave)
+	waiting.visible = false
+
+
+func _label(value: String, size: int, color: Color) -> Label:
 	var label := Label.new()
 	label.text = value
 	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	label.add_theme_font_size_override("font_size", font_size)
+	label.add_theme_font_size_override("font_size", size)
 	label.add_theme_color_override("font_color", color)
 	return label
 
 
-func _button(value: String, font_size: int) -> Button:
+func _button(value: String, size: int) -> Button:
 	var button := Button.new()
 	button.text = value
-	button.custom_minimum_size.y = 48
-	button.add_theme_font_size_override("font_size", font_size)
+	button.custom_minimum_size.y = 44
+	button.add_theme_font_size_override("font_size", size)
 	return button
 
 
-func _display_name(model: String) -> String:
-	match model:
-		"SportsCar": return "Mobil Sport"
-		"SportsCar2": return "Mobil Sport 2"
-		"NormalCar1": return "Sedan 1"
-		"NormalCar2": return "Sedan 2"
-		"SUV": return "SUV"
-		"Taxi": return "Taksi"
-		"Cop": return "Polisi"
-	return model
+func _set_player_identity() -> void:
+	GameState.player_name = name_input.text.strip_edges().left(20)
+	if GameState.player_name.is_empty():
+		GameState.player_name = "Pemain"
+	name_input.text = GameState.player_name
 
 
-func _select_car(index: int) -> void:
-	GameState.selected_car = index
-	selected_label.text = "Dipilih: %s" % _display_name(GameState.selected_name())
-	if preview_mesh:
-		preview_mesh.mesh = load(GameState.selected_asset_path()) as Mesh
-	for i in car_buttons.size():
-		car_buttons[i].modulate = Color("f4bb3b") if i == index else Color.WHITE
+func _start_single() -> void:
+	_set_player_identity()
+	GameState.close_room()
+	GameState.multiplayer_mode = false
+	get_tree().change_scene_to_file("res://scenes/game.tscn")
 
 
-func _show_main() -> void:
-	main_panel.visible = true
-	selection_panel.visible = false
+func _show_lan() -> void:
+	_set_player_identity()
+	GameState.scan_rooms()
+	root_box.get_node("LanPanel").visible = true
 
 
-func _show_selection() -> void:
-	main_panel.visible = false
-	selection_panel.visible = true
+func _host_room() -> void:
+	_set_player_identity()
+	GameState.room_name = room_name_input.text.strip_edges()
+	if GameState.room_name.is_empty():
+		GameState.room_name = "%s's Room" % GameState.player_name
+	GameState.room_mode = "Tim 4 vs 4" if mode_option.selected == 1 else "Deathmatch"
+	GameState.room_minutes = [5, 10, 15][time_option.selected]
+	GameState.player_ready = false
+	if GameState.host_room() == OK:
+		_show_waiting()
+		GameState.update_lobby_record()
 
 
-func _enter_arena() -> void:
+func _join_address() -> void:
+	_set_player_identity()
+	GameState.player_ready = false
+	if GameState.join_room(address_input.text) == OK:
+		_show_waiting()
+
+
+func _refresh_rooms() -> void:
+	if Time.get_ticks_msec() % 900 > 40:
+		return
+	for child in room_list.get_children():
+		child.queue_free()
+	for address in GameState.discovery_results:
+		var room: Dictionary = GameState.discovery_results[address]
+		var button := _button("%s  •  %s  •  %s/%s" % [room.get("room", "Room"), room.get("mode", "Deathmatch"), room.get("players", 1), 8], 15)
+		button.pressed.connect(func() -> void:
+			address_input.text = str(address)
+			_join_address()
+		)
+		room_list.add_child(button)
+	if room_list.get_child_count() == 0:
+		room_list.add_child(_label("Belum ada room terdeteksi. Masukkan IP host jika perlu.", 13, Color("9aa5af")))
+
+
+func _show_waiting() -> void:
+	root_box.get_node("LanPanel").visible = false
+	root_box.get_node("WaitingPanel").visible = true
+	_refresh_roster()
+
+
+func _refresh_roster() -> void:
+	if not roster_box:
+		return
+	for child in roster_box.get_children():
+		child.queue_free()
+	for id in GameState.lobby_players:
+		var record: Dictionary = GameState.lobby_players[id]
+		roster_box.add_child(_label("%s  •  %s  •  %s  •  %s" % [record.get("name", "Pemain"), GameState.CAR_NAMES[clampi(int(record.get("car", 0)), 0, GameState.CAR_NAMES.size() - 1)], record.get("team", "Biru"), "SIAP" if record.get("ready", false) else "Menunggu"], 15, Color("d2d7dc")))
+	status_label.text = "%d/8 pemain • %s • %d menit" % [GameState.lobby_players.size(), GameState.room_mode, GameState.room_minutes]
+	start_button.visible = GameState.room_host
+	start_button.disabled = GameState.lobby_players.size() < 2 or not _all_ready()
+
+
+func _all_ready() -> bool:
+	if GameState.lobby_players.size() < 2:
+		return false
+	for record in GameState.lobby_players.values():
+		if not bool(record.get("ready", false)):
+			return false
+	return true
+
+
+func _team_changed(index: int) -> void:
+	GameState.player_team = ["Biru", "Oranye", "Spectator"][index]
+	GameState.update_lobby_record()
+
+
+func _toggle_ready() -> void:
+	GameState.player_ready = not GameState.player_ready
+	ready_button.text = "BATAL SIAP" if GameState.player_ready else "SIAP"
+	GameState.update_lobby_record()
+
+
+func _leave_room() -> void:
+	GameState.close_room()
+	root_box.get_node("WaitingPanel").visible = false
+	root_box.get_node("LanPanel").visible = true
+
+
+func _show_error(message: String) -> void:
+	if status_label:
+		status_label.text = message
+
+
+func _start_match() -> void:
 	get_tree().change_scene_to_file("res://scenes/game.tscn")

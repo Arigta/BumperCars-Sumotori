@@ -49,14 +49,14 @@ func _build_arena() -> void:
 			var dash_pos := Vector3(sin(angle) * distance, 0.027, cos(angle) * distance)
 			_box("Lane dash %d-%d" % [i, dash], dash_pos, Vector3(0.16, 0.025, 2.0), lane_white, angle)
 
-	# Four marked starting spots face the center. Marker3D nodes are ready for cars.
-	for i in 4:
-		var angle := TAU * float(i) / 4.0
-		var pad_pos := Vector3(sin(angle) * 20.0, 0.027, cos(angle) * 20.0)
-		var pad_color: Material = pad_blue if i % 2 == 0 else pad_orange
-		_box("Car start pad %d" % (i + 1), pad_pos, Vector3(4.6, 0.025, 7.0), pad_color, angle)
+	# Eight marked start spots let LAN rooms place a full 4v4 match safely.
+	for i in 8:
+		var angle := TAU * float(i) / 8.0
+		var pad_pos := Vector3(sin(angle) * 23.0, 0.027, cos(angle) * 23.0)
+		var pad_color: Material = pad_blue if i % 2 == 0 else _material(Color("43b879"))
+		_box("Car start pad %d" % (i + 1), pad_pos, Vector3(3.7, 0.025, 5.8), pad_color, angle)
 		var stripe_pos := pad_pos + Vector3(sin(angle) * 2.7, 0.018, cos(angle) * 2.7)
-		_box("Start line %d" % (i + 1), stripe_pos, Vector3(4.4, 0.025, 0.28), lane_white, angle)
+		_box("Start line %d" % (i + 1), stripe_pos, Vector3(3.5, 0.025, 0.25), lane_white, angle)
 		var spawn := Marker3D.new()
 		spawn.name = "CarSpawn_%d" % (i + 1)
 		spawn.position = Vector3(pad_pos.x, 0.15, pad_pos.z)
