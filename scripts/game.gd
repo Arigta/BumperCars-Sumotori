@@ -496,7 +496,7 @@ func _interpolate_network_cars(delta: float) -> void:
 		if not is_instance_valid(car):
 			continue
 		var target_position: Vector3 = car.get_meta("network_target_position", car.global_position)
-		var distance := car.global_position.distance_to(target_position)
+		var distance: float = car.global_position.distance_to(target_position)
 		if distance > 12.0:
 			car.global_position = target_position
 		else:
