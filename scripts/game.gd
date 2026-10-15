@@ -437,12 +437,12 @@ func _rpc_network_state(state: Dictionary) -> void:
 
 
 func _relay_network_state(state: Dictionary) -> void:
-	_apply_network_state(state)
 	var id := int(state.get("id", -1))
 	if id != 1 and remote_players.has(id):
 		var authoritative_car: CharacterBody3D = remote_players[id]
 		for key in ["score", "kills", "deaths", "assists", "nos_energy", "blue_shield_time", "unlimited_nos_time", "jump_charges", "rage_progress", "rage_time", "is_boosting", "is_defeated"]:
 			state[key] = authoritative_car.get(key)
+	_apply_network_state(state)
 	for peer_id in GameState.game_ready_peers:
 		_rpc_apply_network_state.rpc_id(int(peer_id), state)
 
@@ -469,6 +469,8 @@ func _apply_network_state(state: Dictionary) -> void:
 			_apply_car_ability_state(player, state)
 		return
 	if not remote_players.has(id):
+		if not GameState.lobby_players.has(id):
+			return
 		var record: Dictionary = GameState.lobby_players.get(id, {"name": "Pemain %d" % id, "car": 0})
 		if bool(record.get("spectator", false)):
 			return
@@ -486,6 +488,8 @@ func _apply_network_state(state: Dictionary) -> void:
 	_apply_car_ability_state(car, state)
 	car.is_defeated = bool(state.get("is_defeated", false)) or car.health <= 0.0 or car.global_position.y < ARENA_FALL_HEIGHT
 	car.visible = not car.is_defeated
+	car.set_collision_layer_value(1, not car.is_defeated)
+	car.set_collision_mask_value(1, not car.is_defeated)
 	car._update_health_bar()
 	car._update_ability_visuals()
 
