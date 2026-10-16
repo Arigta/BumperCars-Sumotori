@@ -285,8 +285,9 @@ func _add_spawns() -> void:
 
 func _add_hazards() -> void:
 	var volcano: Dictionary = ISLANDS[5]
+	var pool_offsets: Array[Vector2] = [Vector2(-12, 7), Vector2(10, -10), Vector2(12, 10)]
 	for index in range(3):
-		var local_offset := [Vector2(-12, 7), Vector2(10, -10), Vector2(12, 10)][index]
+		var local_offset: Vector2 = pool_offsets[index]
 		var x := float(volcano.center.x + local_offset.x)
 		var z := float(volcano.center.y + local_offset.y)
 		var y := _terrain_height(volcano, x, z) + 0.22

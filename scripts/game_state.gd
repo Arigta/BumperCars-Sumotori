@@ -121,7 +121,7 @@ func _local_player_record() -> Dictionary:
 	return {"name": player_name, "car": selected_car, "team": player_team, "ready": player_ready, "spectator": player_team == "Spectator"}
 
 
-func _on_peer_connected(id: int) -> void:
+func _on_peer_connected(_id: int) -> void:
 	if not room_host:
 		return
 	# The full roster is sent after the new peer registers its car and name.
@@ -297,7 +297,7 @@ func kick_player(id: int) -> void:
 		peer.disconnect_peer(id)
 
 
-func _start_discovery(port: int) -> void:
+func _start_discovery(_port: int) -> void:
 	if discovery.is_bound():
 		discovery.close()
 	if discovery_server.is_listening():

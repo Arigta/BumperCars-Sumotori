@@ -403,17 +403,17 @@ func _add_nav_button(title: String, target: String) -> void:
 	content.add_child(button)
 
 
-func _label(value: String, size: int, color: Color) -> Label:
+func _label(value: String, font_size: int, color: Color) -> Label:
 	var label := Label.new()
 	label.text = value
-	label.add_theme_font_size_override("font_size", size)
+	label.add_theme_font_size_override("font_size", font_size)
 	label.add_theme_color_override("font_color", color)
 	return label
 
 
-func _button(value: String, size: int) -> Button:
+func _button(value: String, font_size: int) -> Button:
 	var button := Button.new()
 	button.text = value
 	button.custom_minimum_size.y = 46
-	button.add_theme_font_size_override("font_size", size)
+	button.add_theme_font_size_override("font_size", font_size)
 	return button
