@@ -22,9 +22,11 @@ const BUMP_IMPULSE_COOLDOWN := 0.18
 var model_path := ""
 var display_name := ""
 var is_bot := false
+var abilities_enabled := true
 var network_remote := false
 var team_name := ""
 var match_over := false
+var on_slippery_surface := false
 var ai_target: Node3D
 var speed := 0.0
 var nos_energy := NOS_MAX_ENERGY
@@ -117,7 +119,7 @@ func _physics_process(delta: float) -> void:
 		wants_nos = target_distance > 9.0 and absf(steer) < 0.8 and throttle > 0.0
 	else:
 		wants_nos = Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT)
-	is_boosting = (nos_energy > 0.0 or unlimited_nos_time > 0.0) and wants_nos and throttle > 0.0
+	is_boosting = abilities_enabled and (nos_energy > 0.0 or unlimited_nos_time > 0.0) and wants_nos and throttle > 0.0
 	if is_boosting and unlimited_nos_time <= 0.0:
 		nos_energy = maxf(0.0, nos_energy - NOS_DRAIN_RATE * delta)
 	elif not is_boosting:
@@ -136,7 +138,7 @@ func _physics_process(delta: float) -> void:
 
 	var forward := -global_basis.z
 	var desired_velocity := forward * speed
-	var grip := 2.0 if is_drifting else 11.0
+	var grip := 2.0 if is_drifting else (4.5 if on_slippery_surface else 11.0)
 	planar_velocity = planar_velocity.lerp(desired_velocity, 1.0 - exp(-grip * delta))
 	bump_velocity = bump_velocity.move_toward(Vector3.ZERO, 8.0 * delta)
 	velocity.x = planar_velocity.x + bump_velocity.x
@@ -168,7 +170,7 @@ func _bot_controls() -> Vector2:
 
 
 func _should_bot_jump() -> bool:
-	if not is_instance_valid(ai_target) or jump_charges <= 0 or not is_on_floor():
+	if not abilities_enabled or not is_instance_valid(ai_target) or jump_charges <= 0 or not is_on_floor():
 		return false
 	var distance := global_position.distance_to(ai_target.global_position)
 	if distance > 7.0:
@@ -245,6 +247,10 @@ func get_impact_velocity() -> Vector3:
 	return planar_velocity + bump_velocity
 
 
+func set_slippery_surface(is_slippery: bool) -> void:
+	on_slippery_surface = is_slippery
+
+
 func _car_impact_velocity(car: CharacterBody3D) -> Vector3:
 	if car.has_method("get_impact_velocity"):
 		return car.get_impact_velocity()
@@ -303,7 +309,7 @@ func record_touch(attacker: CharacterBody3D) -> void:
 
 
 func add_rage_progress(amount: float) -> bool:
-	if rage_time > 0.0 or amount <= 0.0:
+	if not abilities_enabled or rage_time > 0.0 or amount <= 0.0:
 		return false
 	rage_progress = minf(100.0, rage_progress + amount)
 	if rage_progress < 100.0:
@@ -316,6 +322,8 @@ func add_rage_progress(amount: float) -> bool:
 
 
 func apply_pickup(ability: String) -> void:
+	if not abilities_enabled:
+		return
 	match ability:
 		"blue_shield":
 			blue_shield_time = 5.0
@@ -327,7 +335,7 @@ func apply_pickup(ability: String) -> void:
 
 
 func activate_jump() -> bool:
-	if jump_charges <= 0 or is_defeated or not is_on_floor():
+	if not abilities_enabled or jump_charges <= 0 or is_defeated or not is_on_floor():
 		return false
 	jump_charges -= 1
 	velocity.y = JUMP_FORCE

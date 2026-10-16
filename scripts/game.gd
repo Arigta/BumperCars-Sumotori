@@ -1,6 +1,7 @@
 extends Node3D
 
 const PLAYER_CAR = preload("res://scripts/player_car.gd")
+const FLOATING_ISLAND_ARENA = preload("res://scenes/floating_island_arena.tscn")
 const BOT_COUNT := 3
 const ARENA_FALL_HEIGHT := -8.0
 const RESPAWN_COOLDOWN := 3.0
@@ -61,6 +62,8 @@ var results_label: Label
 
 
 func _ready() -> void:
+	if not GameState.multiplayer_mode:
+		_use_single_player_arena()
 	for index in 8:
 		var marker := get_node_or_null("Arena/CarSpawn_%d" % (index + 1)) as Marker3D
 		if marker:
@@ -110,6 +113,48 @@ func _ready() -> void:
 		follow_camera.global_position = Vector3(0.0, 20.0, 32.0)
 		follow_camera.look_at(Vector3.ZERO)
 	GameState.announce_game_ready()
+
+
+func _use_single_player_arena() -> void:
+	var old_arena := get_node_or_null("Arena")
+	if is_instance_valid(old_arena):
+		remove_child(old_arena)
+		old_arena.free()
+	var arena := FLOATING_ISLAND_ARENA.instantiate()
+	arena.name = "Arena"
+	add_child(arena)
+	for hazard_node in get_tree().get_nodes_in_group("arena_hazards"):
+		var hazard := hazard_node as Area3D
+		if is_instance_valid(hazard):
+			hazard.body_entered.connect(_on_arena_hazard_entered)
+	for surface_node in get_tree().get_nodes_in_group("slippery_surfaces"):
+		var surface := surface_node as Area3D
+		if is_instance_valid(surface):
+			surface.body_entered.connect(_on_slippery_surface_entered)
+			surface.body_exited.connect(_on_slippery_surface_exited)
+
+
+func _on_slippery_surface_entered(body: Node3D) -> void:
+	if body.has_method("set_slippery_surface"):
+		body.call("set_slippery_surface", true)
+
+
+func _on_slippery_surface_exited(body: Node3D) -> void:
+	if body.has_method("set_slippery_surface"):
+		body.call("set_slippery_surface", false)
+
+
+func _on_arena_hazard_entered(body: Node3D) -> void:
+	if not body is CharacterBody3D:
+		return
+	var car := body as CharacterBody3D
+	if car.is_defeated:
+		return
+	car.health = 0.0
+	car.is_defeated = true
+	car._update_health_bar()
+	if car == player:
+		_player_fell()
 
 
 func _process(delta: float) -> void:
@@ -193,6 +238,7 @@ func _unhandled_input(event: InputEvent) -> void:
 
 func _spawn_player(marker: Marker3D) -> CharacterBody3D:
 	var car = PLAYER_CAR.new()
+	car.abilities_enabled = GameState.multiplayer_mode
 	car.model_path = GameState.selected_asset_path()
 	car.is_bot = false
 	car.display_name = GameState.player_name
@@ -522,6 +568,7 @@ func _apply_car_ability_state(car: CharacterBody3D, state: Dictionary) -> void:
 
 func _spawn_bot(marker: Marker3D, slot: int, record: Dictionary = {}) -> CharacterBody3D:
 	var car = PLAYER_CAR.new()
+	car.abilities_enabled = GameState.multiplayer_mode
 	var model_name := ""
 	if record.is_empty():
 		var model_names: Array = GameState.CAR_NAMES.duplicate()
@@ -676,6 +723,11 @@ func _update_player_hud() -> void:
 	nos_meter.value = 100.0 if player.unlimited_nos_time > 0.0 else player.nos_energy
 	health_meter.value = player.health
 	rage_meter.value = player.rage_progress
+	if not player.abilities_enabled:
+		nos_label.text = "WASD bergerak  •  Shift drift"
+		ability_status_label.text = ""
+		nos_meter.value = 0.0
+		rage_meter.value = 0.0
 	score_label.text = "POIN  %d" % player.score
 	var health_fill := health_meter.get_theme_stylebox("fill") as StyleBoxFlat
 	if health_fill:
@@ -806,6 +858,11 @@ func _build_hud() -> void:
 	rage_title.add_theme_font_size_override("font_size", 11)
 	rage_box.add_child(rage_title)
 	rage_meter = _make_meter(rage_box, Color("ff5148"))
+
+	if not GameState.multiplayer_mode:
+		nos_title.hide()
+		nos_meter.hide()
+		rage_panel.hide()
 
 	var menu_button := Button.new()
 	menu_button.text = "MENU  (Esc)"
@@ -1131,6 +1188,8 @@ func _award_fall(victim: CharacterBody3D) -> void:
 
 
 func _update_pickups(delta: float) -> void:
+	if not GameState.multiplayer_mode:
+		return
 	for pickup in pickups:
 		if is_instance_valid(pickup):
 			var base_y: float = pickup.get_meta("base_y", 0.5)
