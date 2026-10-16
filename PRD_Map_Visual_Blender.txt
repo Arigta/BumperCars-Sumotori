@@ -1,0 +1,86 @@
+PRD VISUAL MAP — ARENA KEPULAUAN TERAPUNG
+
+Tujuan
+Dokumen ini menjadi panduan desain visual untuk membuat map di Blender. Cakupannya hanya bentuk, skala, warna, material, dan properti lingkungan. Kode, collision, serta mekanik permainan tidak termasuk.
+
+1. KONSEP VISUAL
+
+Arena berupa gugusan pulau terapung dengan gaya low-poly 3D, warna cerah, bentuk pulau yang jelas, dan tebing batu berfaset di bagian bawah. Bioma terdiri dari pulau salju, hutan, gurun, hutan tropis, dan gunung berapi. Latar di antara pulau menggunakan warna biru tua agar gugusan pulau tampak kontras dan melayang.
+
+2. SKALA DAN SUSUNAN
+
+- Gunakan mobil sebagai acuan skala Blender: panjang mobil sekitar 3,65 m.
+- Luas keseluruhan gugusan: sekitar 200 x 210 m.
+- Pulau tengah: diameter sekitar 62 m.
+- Lima pulau bioma: diameter masing-masing sekitar 54 m.
+- Jembatan: lebar visual sekitar 10–11 m.
+- Susun pulau mengelilingi pulau tengah. Hubungkan pulau tengah ke setiap pulau bioma dengan jembatan.
+- Beri jarak antarpulau agar gugusan terlihat terpisah dan terapung, bukan seperti satu daratan besar.
+
+3. DESAIN PULAU
+
+Pulau tengah — Hub arena
+Daratan pusat berwarna pasir batu yang hangat. Bentuk permukaannya bergelombang lembut, tetapi bagian tengah dibuat lapang agar tampil sebagai pusat visual arena. Batasi properti tinggi di dekat titik masuk jembatan.
+
+Pulau salju
+Gunakan puncak dan lereng bersalju dengan beberapa bongkahan es atau gunung kecil. Tambahkan aksen biru pucat pada es dan bayangan biru dingin pada salju agar bentuknya terbaca.
+
+Pulau hutan
+Daratan hijau dengan pepohonan low-poly dan beberapa batu. Sisakan area terbuka di sekitar ujung jembatan agar jalur masuk terlihat jelas.
+
+Pulau gurun
+Gunakan pasir kuning keemasan dan jingga, bukit pasir membulat, serta beberapa batu kering. Variasikan warna punggung bukit dan lereng.
+
+Pulau hutan tropis
+Gunakan vegetasi yang lebih lebat dan hijau lebih terang daripada pulau hutan. Tambahkan pohon tropis, semak, dan aksen daun besar; jangan menutupi siluet pulau.
+
+Pulau gunung berapi
+Gunakan batuan merah kecokelatan dan abu gelap, dengan kawah atau celah bercahaya jingga. Lava menjadi aksen visual terang yang mudah terlihat dari atas.
+
+4. JEMBATAN
+
+- Buat jembatan sebagai elemen visual penghubung antarpulau.
+- Gunakan bentuk sederhana dan sedikit melengkung atau menurun landai.
+- Jembatan kayu cocok untuk pulau hutan; batu atau basalt cocok untuk bioma lain.
+- Tambahkan detail papan, batu, atau penyangga secukupnya agar terbaca dari kamera permainan.
+- Pertahankan permukaan jembatan yang lebar dan relatif bersih di dekat kedua ujungnya.
+- Hindari ornamen tinggi yang membuat jalurnya tampak tertutup.
+
+5. TEBING BAWAH PULAU
+
+- Buat bagian bawah pulau seperti batuan terapung dengan bentuk berundak dan faset besar.
+- Hindari siluet cakram atau silinder yang terlalu rapi.
+- Tambahkan tonjolan dan lapisan batu dengan ukuran berbeda.
+- Tambahkan aksen sesuai bioma: es menggantung di pulau salju, akar atau batu di pulau hijau, serta lava di pulau gunung berapi.
+- Gunakan warna sisi bawah yang lebih gelap daripada permukaan atas agar pulau terlihat memiliki kedalaman.
+
+6. GAYA DAN PALET WARNA
+
+- Latar: biru tua dan biru gelap.
+- Pulau tengah: pasir krem dan cokelat batu.
+- Salju: putih kebiruan dan biru es.
+- Hutan: hijau sedang, hijau muda, dan cokelat.
+- Gurun: kuning keemasan, jingga, dan cokelat.
+- Tropis: hijau terang dan hijau tua.
+- Gunung berapi: merah tanah, abu gelap, dan jingga lava.
+- Jembatan: cokelat kayu atau abu batu, dengan permukaan sedikit lebih terang.
+
+Gunakan material sederhana dengan tekstur minimal. Variasi warna dan bentuk geometri menjadi sumber detail utama.
+
+7. KEPADATAN PROPERTI
+
+- Pastikan gugusan pulau mudah dikenali dari tampak atas dan kamera miring.
+- Tempatkan properti besar sebagai aksen di sekitar lereng atau tepi, bukan menutupi seluruh permukaan.
+- Jalur penghubung dan area terbuka di pulau tengah harus terlihat jelas.
+- Hindari detail kecil yang tidak terbaca dari jarak kamera permainan.
+
+8. KRITERIA HASIL BLENDER
+
+- Gugusan pulau terlihat jelas dari tampak atas dan sudut kamera miring.
+- Setiap pulau dapat dibedakan dari bentuk dan palet warnanya.
+- Jembatan tampak lebar, menghubungkan pulau, dan terlihat sebagai jalur yang dapat dilalui mobil.
+- Permukaan pulau memiliki kontur dan variasi elevasi yang terlihat, bukan dataran rata.
+- Bagian bawah pulau memiliki siluet batuan yang kuat.
+- Detail tidak membuat bentuk utama map sulit dibaca.
+
+Di luar cakupan dokumen ini: kode Godot, collision, navigasi, hazard, pickup, ability, dan aturan permainan.
