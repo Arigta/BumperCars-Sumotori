@@ -1,13 +1,18 @@
 @tool
 extends Node3D
 
-## Four connected islands with roughly the same total walkable area as the old arena.
-const HUB_RADIUS := 18.0
-const ISLAND_RADIUS := 17.2
-const BRIDGE_WIDTH := 8.5
-const OUTER_DISTANCE := 45.0
+const SEGMENTS := 64
+const RINGS := 12
+const ISLANDS := [
+	{"name": "Hub", "center": Vector2(0, 0), "radius": 31.0, "height": 2.0, "theme": "hub", "color": Color("#d8bd83"), "seed": 2},
+	{"name": "Snow", "center": Vector2(-72, -42), "radius": 27.0, "height": 5.0, "theme": "snow", "color": Color("#b9e9f6"), "seed": 7},
+	{"name": "Forest", "center": Vector2(72, -42), "radius": 27.0, "height": 3.0, "theme": "forest", "color": Color("#74b94c"), "seed": 13},
+	{"name": "Desert", "center": Vector2(0, -88), "radius": 27.0, "height": 1.5, "theme": "desert", "color": Color("#f2bd48"), "seed": 19},
+	{"name": "Jungle", "center": Vector2(-61, 66), "radius": 27.0, "height": 3.5, "theme": "jungle", "color": Color("#4cae61"), "seed": 29},
+	{"name": "Volcano", "center": Vector2(61, 66), "radius": 27.0, "height": 2.0, "theme": "volcano", "color": Color("#dc7836"), "seed": 37},
+]
 
-var hazard_material: StandardMaterial3D
+var _built := false
 
 
 func _ready() -> void:
@@ -15,288 +20,331 @@ func _ready() -> void:
 
 
 func _build_arena() -> void:
+	if _built:
+		return
+	_built = true
 	for child in get_children():
 		child.free()
-
-	var hub := Vector3.ZERO
-	var desert := Vector3(-OUTER_DISTANCE * 0.866, 0.0, OUTER_DISTANCE * 0.5)
-	var forest := Vector3(OUTER_DISTANCE * 0.866, 0.0, OUTER_DISTANCE * 0.5)
-	var volcano := Vector3(0.0, 0.0, -OUTER_DISTANCE)
-
-	var stone := _material(Color("676d70"))
-	var sand := _material(Color("c89e60"))
-	var grass := _material(Color("477c56"))
-	var basalt := _material(Color("343840"))
-	var lava := _material(Color("b93920"), Color("ff4c14"), 2.0)
-	hazard_material = lava
-	var bridge_stone := _material(Color("99938a"))
-	var bridge_wood := _material(Color("795438"))
-	var bridge_basalt := _material(Color("4b4c50"))
-
-	_add_lava_ocean(lava)
-	_add_island("Central hub", hub, HUB_RADIUS, 0.0, stone, Color("bbb4a7"))
-	_add_island("Sandy island", desert, ISLAND_RADIUS, 2.0, sand, Color("e8c47d"))
-	_add_island("Forest island", forest, ISLAND_RADIUS, 4.0, grass, Color("88bd68"))
-	_add_island("Volcanic island", volcano, ISLAND_RADIUS, 1.0, basalt, Color("e25731"))
-
-	_build_bridge("Stone bridge to sand", hub, 0.0, HUB_RADIUS, desert, 2.0, ISLAND_RADIUS, bridge_stone, false)
-	_build_bridge("Wood bridge to forest", hub, 0.0, HUB_RADIUS, forest, 4.0, ISLAND_RADIUS, bridge_wood, true)
-	_build_bridge("Basalt bridge to volcano", hub, 0.0, HUB_RADIUS, volcano, 1.0, ISLAND_RADIUS, bridge_basalt, false)
-	_add_sand_dunes(desert, 2.0)
-	_add_sand_surface(desert, 2.0)
-	_add_forest_trees(forest, 4.0)
-	_add_volcanic_hazards(volcano, 1.0)
-	_add_spawn_markers(hub)
-	_add_sky_and_camera()
+	_add_ocean()
+	for island_data in ISLANDS:
+		_add_island(island_data)
+	_add_bridges()
+	_add_spawns()
+	_add_hazards()
+	_add_camera()
 
 
-func _add_island(label: String, center: Vector3, radius: float, height: float, surface: Material, edge_color: Color) -> void:
-	var ground := StaticBody3D.new()
-	ground.name = "%s ground" % label
-	ground.position = Vector3(center.x, height - 1.0, center.z)
-	add_child(ground)
-	var ground_mesh := CylinderMesh.new()
-	ground_mesh.top_radius = radius
-	ground_mesh.bottom_radius = radius * 0.94
-	ground_mesh.height = 2.0
-	ground_mesh.radial_segments = 64
-	var ground_visual := MeshInstance3D.new()
-	ground_visual.mesh = ground_mesh
-	ground_visual.material_override = surface
-	ground.add_child(ground_visual)
-	var floor_shape := CylinderShape3D.new()
-	floor_shape.radius = radius
-	floor_shape.height = 2.0
-	var floor_collider := CollisionShape3D.new()
-	floor_collider.shape = floor_shape
-	ground.add_child(floor_collider)
-
-	var underside := CylinderMesh.new()
-	underside.top_radius = radius * 0.76
-	underside.bottom_radius = 2.2
-	underside.height = 13.0
-	underside.radial_segments = 48
-	var rock := MeshInstance3D.new()
-	rock.name = "%s floating rock" % label
-	rock.mesh = underside
-	rock.material_override = _material(edge_color.darkened(0.38))
-	rock.position = Vector3(center.x, height - 8.3, center.z)
-	add_child(rock)
-
-	var rim := MeshInstance3D.new()
-	var rim_mesh := TorusMesh.new()
-	rim_mesh.inner_radius = radius - 0.48
-	rim_mesh.outer_radius = radius - 0.22
-	rim.mesh = rim_mesh
-	rim.material_override = _material(edge_color)
-	rim.position = Vector3(center.x, height + 0.06, center.z)
-	add_child(rim)
-
-	var sign := Label3D.new()
-	sign.name = "%s name" % label
-	sign.text = label.to_upper()
-	sign.font_size = 48
-	sign.outline_size = 8
-	sign.modulate = Color("f2eee5")
-	sign.position = Vector3(center.x, height + 0.25, center.z + radius * 0.58)
-	add_child(sign)
-
-
-func _build_bridge(label: String, start_center: Vector3, start_height: float, start_radius: float, end_center: Vector3, end_height: float, end_radius: float, deck_material: Material, wooden_planks: bool) -> void:
-	var direction := Vector3(end_center.x - start_center.x, 0.0, end_center.z - start_center.z).normalized()
-	var start := Vector3(start_center.x, start_height, start_center.z) + direction * (start_radius - 1.1)
-	var finish := Vector3(end_center.x, end_height, end_center.z) - direction * (end_radius - 1.1)
-	var span := start.distance_to(finish)
-	var bridge := StaticBody3D.new()
-	bridge.name = label
-	bridge.position = (start + finish) * 0.5
-	add_child(bridge)
-	bridge.look_at(finish, Vector3.UP)
-	var deck_size := Vector3(BRIDGE_WIDTH, 0.62, span + 0.5)
-	var deck := BoxMesh.new()
-	deck.size = deck_size
-	var deck_visual := MeshInstance3D.new()
-	deck_visual.mesh = deck
-	deck_visual.material_override = deck_material
-	bridge.add_child(deck_visual)
-	var deck_shape := BoxShape3D.new()
-	deck_shape.size = deck_size
-	var deck_collider := CollisionShape3D.new()
-	deck_collider.shape = deck_shape
-	bridge.add_child(deck_collider)
-
-	if wooden_planks:
-		var plank_material := _material(Color("a77a4c"))
-		for index in 9:
-			var plank := MeshInstance3D.new()
-			var plank_mesh := BoxMesh.new()
-			plank_mesh.size = Vector3(BRIDGE_WIDTH - 0.25, 0.14, span / 9.0 - 0.07)
-			plank.mesh = plank_mesh
-			plank.material_override = plank_material
-			plank.position = Vector3(0.0, 0.37, -span * 0.5 + span * (float(index) + 0.5) / 9.0)
-			bridge.add_child(plank)
-
-
-func _add_sand_dunes(center: Vector3, height: float) -> void:
-	for offset in [Vector3(-8.0, 0.0, -5.0), Vector3(8.0, 0.0, 6.0), Vector3(-9.0, 0.0, 8.0)]:
-		var dune := MeshInstance3D.new()
-		var mesh := SphereMesh.new()
-		mesh.radius = 3.2
-		mesh.height = 1.0
-		dune.mesh = mesh
-		dune.material_override = _material(Color("d5ad70"))
-		dune.scale = Vector3(1.5, 0.16, 0.8)
-		dune.position = Vector3(center.x + offset.x, height + 0.04, center.z + offset.z)
-		add_child(dune)
-
-
-func _add_sand_surface(center: Vector3, height: float) -> void:
-	var area := Area3D.new()
-	area.name = "Loose sand traction zone"
-	area.add_to_group("slippery_surfaces")
-	area.collision_layer = 2
-	area.collision_mask = 1
-	area.position = Vector3(center.x, height + 0.2, center.z)
-	var shape := CylinderShape3D.new()
-	shape.radius = ISLAND_RADIUS - 0.6
-	shape.height = 1.8
-	var collider := CollisionShape3D.new()
-	collider.shape = shape
-	area.add_child(collider)
-	add_child(area)
-
-
-func _add_forest_trees(center: Vector3, height: float) -> void:
-	for offset in [Vector3(-10.0, 0.0, -8.0), Vector3(10.0, 0.0, -7.0), Vector3(-10.0, 0.0, 8.0), Vector3(7.0, 0.0, -10.0)]:
-		var tree := StaticBody3D.new()
-		tree.name = "Forest tree trunk"
-		tree.position = Vector3(center.x + offset.x, height, center.z + offset.z)
-		add_child(tree)
-		var trunk_mesh := CylinderMesh.new()
-		trunk_mesh.top_radius = 0.45
-		trunk_mesh.bottom_radius = 0.65
-		trunk_mesh.height = 3.2
-		var trunk := MeshInstance3D.new()
-		trunk.mesh = trunk_mesh
-		trunk.material_override = _material(Color("61452d"))
-		trunk.position.y = 1.6
-		tree.add_child(trunk)
-		var trunk_shape := CylinderShape3D.new()
-		trunk_shape.radius = 0.65
-		trunk_shape.height = 3.2
-		var trunk_collider := CollisionShape3D.new()
-		trunk_collider.shape = trunk_shape
-		trunk_collider.position.y = 1.6
-		tree.add_child(trunk_collider)
-		var crown := MeshInstance3D.new()
-		var crown_mesh := SphereMesh.new()
-		crown_mesh.radius = 2.2
-		crown_mesh.height = 4.4
-		crown.mesh = crown_mesh
-		crown.material_override = _material(Color("427c4b"))
-		crown.position.y = 4.1
-		tree.add_child(crown)
-
-
-func _add_volcanic_hazards(center: Vector3, height: float) -> void:
-	for offset in [Vector3(-8.0, 0.0, -8.0), Vector3(8.0, 0.0, -7.0), Vector3(-9.0, 0.0, 5.0)]:
-		var pool_center := Vector3(center.x + offset.x, height + 0.08, center.z + offset.z)
-		var warning := MeshInstance3D.new()
-		var warning_mesh := TorusMesh.new()
-		warning_mesh.inner_radius = 2.8
-		warning_mesh.outer_radius = 3.15
-		warning.mesh = warning_mesh
-		warning.material_override = _material(Color("f1a04f"), Color("ff6a1c"), 0.8)
-		warning.position = pool_center
-		add_child(warning)
-
-		var area := Area3D.new()
-		area.name = "Lava hazard"
-		area.add_to_group("arena_hazards")
-		area.position = pool_center
-		area.collision_layer = 0
-		area.collision_mask = 1
-		var pool_shape := CylinderShape3D.new()
-		pool_shape.radius = 2.55
-		pool_shape.height = 1.0
-		var pool_collider := CollisionShape3D.new()
-		pool_collider.shape = pool_shape
-		area.add_child(pool_collider)
-		var pool_mesh := CylinderMesh.new()
-		pool_mesh.top_radius = 2.55
-		pool_mesh.bottom_radius = 2.55
-		pool_mesh.height = 0.12
-		var pool_visual := MeshInstance3D.new()
-		pool_visual.mesh = pool_mesh
-		pool_visual.material_override = hazard_material
-		area.add_child(pool_visual)
-		add_child(area)
-
-
-func _add_spawn_markers(center: Vector3) -> void:
-	for index in 8:
-		var angle := TAU * float(index) / 8.0
-		var marker := Marker3D.new()
-		marker.name = "CarSpawn_%d" % (index + 1)
-		marker.position = Vector3(center.x + sin(angle) * 10.0, 0.15, center.z + cos(angle) * 10.0)
-		marker.rotation.y = angle
-		add_child(marker)
-
-
-func _add_lava_ocean(material: Material) -> void:
+func _add_ocean() -> void:
 	var ocean := MeshInstance3D.new()
-	ocean.name = "Lava far below"
-	var mesh := CylinderMesh.new()
-	mesh.top_radius = 100.0
-	mesh.bottom_radius = 100.0
-	mesh.height = 0.5
-	mesh.radial_segments = 64
-	ocean.mesh = mesh
+	ocean.name = "Lava Ocean"
+	var plane := PlaneMesh.new()
+	plane.size = Vector2(330.0, 350.0)
+	ocean.mesh = plane
+	ocean.position = Vector3(0, -15.0, -10.0)
+	var material := StandardMaterial3D.new()
+	material.albedo_color = Color("#10245b")
+	material.roughness = 0.9
 	ocean.material_override = material
-	ocean.position.y = -18.0
 	add_child(ocean)
 
 
-func _add_sky_and_camera() -> void:
-	var sun := DirectionalLight3D.new()
-	sun.name = "Floating islands sun"
-	sun.rotation_degrees = Vector3(-52.0, -28.0, 0.0)
-	sun.light_energy = 1.3
-	sun.shadow_enabled = true
-	add_child(sun)
+func _add_island(data: Dictionary) -> void:
+	var center: Vector2 = data.center
+	var radius: float = data.radius
+	var base_y: float = data.height
+	var seed_value: int = data.seed
+	var surface_tool := SurfaceTool.new()
+	surface_tool.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var faces := PackedVector3Array()
+	for ring in RINGS:
+		var r0 := radius * float(ring) / float(RINGS)
+		var r1 := radius * float(ring + 1) / float(RINGS)
+		for segment in SEGMENTS:
+			var a0 := TAU * float(segment) / float(SEGMENTS)
+			var a1 := TAU * float(segment + 1) / float(SEGMENTS)
+			var p00 := _terrain_point(center, radius, r0, a0, base_y, seed_value)
+			var p01 := _terrain_point(center, radius, r0, a1, base_y, seed_value)
+			var p10 := _terrain_point(center, radius, r1, a0, base_y, seed_value)
+			var p11 := _terrain_point(center, radius, r1, a1, base_y, seed_value)
+			if ring == 0:
+				_add_terrain_triangle(surface_tool, faces, Vector3(center.x, base_y, center.y), p11, p10, data.color, data.theme)
+			else:
+				_add_terrain_triangle(surface_tool, faces, p00, p01, p10, data.color, data.theme)
+				_add_terrain_triangle(surface_tool, faces, p01, p11, p10, data.color, data.theme)
+	surface_tool.generate_normals()
+	var mesh_instance := MeshInstance3D.new()
+	mesh_instance.name = "%s Terrain" % data.name
+	mesh_instance.mesh = surface_tool.commit()
+	var terrain_material := StandardMaterial3D.new()
+	terrain_material.vertex_color_use_as_albedo = true
+	terrain_material.roughness = 0.95
+	mesh_instance.material_override = terrain_material
+	add_child(mesh_instance)
+	var body := StaticBody3D.new()
+	body.name = "%s Ground" % data.name
+	var collision := CollisionShape3D.new()
+	var shape := ConcavePolygonShape3D.new()
+	shape.backface_collision = true
+	shape.set_faces(faces)
+	collision.shape = shape
+	body.add_child(collision)
+	add_child(body)
+	_add_cliff(data)
+	_add_theme_props(data)
+	if data.theme == "desert":
+		_add_sand_zone(data)
 
+
+func _terrain_point(center: Vector2, radius: float, r: float, angle: float, base_y: float, seed_value: int) -> Vector3:
+	var edge_wave := 1.0 + 0.035 * sin(angle * 5.0 + float(seed_value)) + 0.022 * sin(angle * 9.0 - float(seed_value) * 0.3)
+	var edge_radius := radius * edge_wave
+	var normalized := r / radius
+	var envelope := sin(PI * normalized)
+	var broad_hill := sin(angle * 2.0 + float(seed_value)) * 1.6 + cos(angle * 3.0 - float(seed_value) * 0.2) * 0.8
+	var y := base_y + envelope * (0.4 + normalized * broad_hill)
+	if normalized > 0.16 and normalized < 0.90:
+		var ridge := maxf(0.0, sin(angle * 3.0 + float(seed_value) * 0.7))
+		y += pow(ridge, 4.0) * sin(normalized * PI) * 3.5
+	return Vector3(center.x + cos(angle) * normalized * edge_radius, y, center.y + sin(angle) * normalized * edge_radius)
+
+
+func _add_terrain_triangle(st: SurfaceTool, faces: PackedVector3Array, a: Vector3, b: Vector3, c: Vector3, base_color: Color, theme: String) -> void:
+	for point in [a, b, c]:
+		var elevation_tint := clampf((point.y - 1.0) / 9.0, 0.0, 0.23)
+		var color := base_color.lerp(Color("#f4e5c3"), elevation_tint)
+		if theme == "volcano":
+			color = color.lerp(Color("#612f32"), clampf((point.y - 2.0) / 9.0, 0.0, 0.32))
+		st.set_color(color)
+		st.add_vertex(point)
+	faces.append_array(PackedVector3Array([a, b, c]))
+
+
+func _terrain_height(data: Dictionary, world_x: float, world_z: float) -> float:
+	var center: Vector2 = data.center
+	var offset := Vector2(world_x - center.x, world_z - center.y)
+	return _terrain_point(center, data.radius, offset.length(), offset.angle(), data.height, data.seed).y
+
+
+func _add_cliff(data: Dictionary) -> void:
+	var rock := MeshInstance3D.new()
+	var mesh := CylinderMesh.new()
+	mesh.top_radius = float(data.radius) * 0.98
+	mesh.bottom_radius = float(data.radius) * 0.72
+	mesh.height = 9.0
+	mesh.radial_segments = 9
+	mesh.rings = 2
+	rock.mesh = mesh
+	rock.position = Vector3(data.center.x, float(data.height) - 4.5, data.center.y)
+	var material := StandardMaterial3D.new()
+	material.albedo_color = Color("#70504a") if data.theme != "snow" else Color("#667a91")
+	material.roughness = 1.0
+	rock.material_override = material
+	add_child(rock)
+
+
+func _add_bridges() -> void:
+	var hub: Dictionary = ISLANDS[0]
+	for index in range(1, ISLANDS.size()):
+		var island: Dictionary = ISLANDS[index]
+		var direction: Vector2 = island.center - hub.center
+		var unit := direction.normalized()
+		var half_width := 5.4
+		var start_2d: Vector2 = hub.center + unit * (float(hub.radius) - 4.0)
+		var end_2d: Vector2 = island.center - unit * (float(island.radius) - 4.0)
+		var start := Vector3(start_2d.x, _terrain_height(hub, start_2d.x, start_2d.y) + 0.2, start_2d.y)
+		var finish := Vector3(end_2d.x, _terrain_height(island, end_2d.x, end_2d.y) + 0.2, end_2d.y)
+		_add_bridge(island.name, start, finish, half_width, island.theme == "forest")
+
+
+func _add_bridge(label: String, start: Vector3, finish: Vector3, width: float, wooden: bool) -> void:
+	var delta := finish - start
+	var length := delta.length()
+	var center := (start + finish) * 0.5
+	var basis := Basis().looking_at(delta.normalized(), Vector3.UP)
+	var bridge := StaticBody3D.new()
+	bridge.name = "%s Bridge" % label
+	bridge.position = center
+	bridge.basis = basis
+	var deck := BoxMesh.new()
+	deck.size = Vector3(width, 0.55, length + 1.5)
+	var mesh_instance := MeshInstance3D.new()
+	mesh_instance.mesh = deck
+	mesh_instance.position.y = -0.22
+	var material := StandardMaterial3D.new()
+	material.albedo_color = Color("#8b5937") if wooden else Color("#827a7e")
+	material.roughness = 0.92
+	mesh_instance.material_override = material
+	bridge.add_child(mesh_instance)
+	var collider := CollisionShape3D.new()
+	var shape := BoxShape3D.new()
+	shape.size = Vector3(width, 0.55, length + 1.5)
+	collider.shape = shape
+	collider.position.y = -0.22
+	bridge.add_child(collider)
+	add_child(bridge)
+	if wooden:
+		for plank_index in range(1, 13):
+			var plank := MeshInstance3D.new()
+			var plank_mesh := BoxMesh.new()
+			plank_mesh.size = Vector3(width + 0.12, 0.08, 0.16)
+			plank.mesh = plank_mesh
+			plank.position = Vector3(0, 0.09, -length * 0.5 + length * float(plank_index) / 13.0)
+			var plank_material := StandardMaterial3D.new()
+			plank_material.albedo_color = Color("#ad7546")
+			plank.material_override = plank_material
+			bridge.add_child(plank)
+
+
+func _add_theme_props(data: Dictionary) -> void:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = int(data.seed) * 937
+	var theme: String = data.theme
+	var color: Color = data.color
+	var center: Vector2 = data.center
+	for index in 9:
+		var angle := TAU * float(index) / 9.0 + rng.randf_range(-0.2, 0.2)
+		var radius := rng.randf_range(9.0, float(data.radius) * 0.68)
+		var x := center.x + cos(angle) * radius
+		var z := center.y + sin(angle) * radius
+		var h := _terrain_height(data, x, z)
+		if theme == "snow":
+			_add_prop_cone("Ice Peak %d" % index, Vector3(x, h, z), rng.randf_range(3.0, 6.5), Color("#e8f8ff"), 7)
+		elif theme == "desert":
+			_add_prop_cone("Sand Dune %d" % index, Vector3(x, h, z), rng.randf_range(2.0, 4.0), Color("#ffd66a"), 6)
+		elif theme == "volcano":
+			if index % 2 == 0:
+				_add_prop_cone("Basalt Spire %d" % index, Vector3(x, h, z), rng.randf_range(3.0, 5.0), Color("#824943"), 6)
+		elif theme == "forest" or theme == "jungle":
+			var trunk := _add_prop_cylinder("Tree Trunk %d" % index, Vector3(x, h + 1.65, z), 0.65, 3.2, Color("#765039"))
+			_add_prop_cone("Tree Canopy %d" % index, Vector3(x, h + 2.8, z), 3.0, color, 7)
+			if theme == "jungle":
+				trunk.scale.x = 1.35
+	_add_center_marker(data)
+
+
+func _add_center_marker(data: Dictionary) -> void:
+	var center: Vector2 = data.center
+	var pos := Vector3(center.x, float(data.height) + 0.4, center.y)
+	if data.theme == "snow":
+		_add_prop_cone("Snow Summit", pos, 6.2, Color("#effaff"), 7)
+	elif data.theme == "volcano":
+		_add_prop_cone("Volcano Crater Rim", pos, 7.0, Color("#713b37"), 8)
+		_add_prop_cone("Lava Spire", pos + Vector3(0, 2.0, 0), 4.0, Color("#ff7135"), 7)
+	elif data.theme == "desert":
+		_add_prop_cone("Golden Dune", pos, 6.5, Color("#ffdb65"), 6)
+
+
+func _add_prop_cone(label: String, position: Vector3, height: float, color: Color, sides: int) -> MeshInstance3D:
+	var node := MeshInstance3D.new()
+	node.name = label
+	var mesh := CylinderMesh.new()
+	mesh.top_radius = 0.0
+	mesh.bottom_radius = height * 0.48
+	mesh.height = height
+	mesh.radial_segments = sides
+	mesh.rings = 1
+	node.mesh = mesh
+	node.position = position + Vector3.UP * height * 0.5
+	var material := StandardMaterial3D.new()
+	material.albedo_color = color
+	material.roughness = 0.9
+	node.material_override = material
+	add_child(node)
+	return node
+
+
+func _add_prop_cylinder(label: String, position: Vector3, radius: float, height: float, color: Color) -> MeshInstance3D:
+	var node := MeshInstance3D.new()
+	node.name = label
+	var mesh := CylinderMesh.new()
+	mesh.top_radius = radius * 0.8
+	mesh.bottom_radius = radius
+	mesh.height = height
+	mesh.radial_segments = 7
+	node.mesh = mesh
+	node.position = position
+	var material := StandardMaterial3D.new()
+	material.albedo_color = color
+	node.material_override = material
+	add_child(node)
+	return node
+
+
+func _add_spawns() -> void:
+	var hub: Dictionary = ISLANDS[0]
+	for index in range(8):
+		var angle := TAU * float(index) / 8.0
+		var x := cos(angle) * 14.0
+		var z := sin(angle) * 14.0
+		var marker := Marker3D.new()
+		marker.name = "CarSpawn_%d" % (index + 1)
+		marker.position = Vector3(x, _terrain_height(hub, x, z) + 0.1, z)
+		marker.rotation.y = -angle + PI * 0.5
+		add_child(marker)
+
+
+func _add_hazards() -> void:
+	var volcano: Dictionary = ISLANDS[5]
+	for index in range(3):
+		var local_offset := [Vector2(-12, 7), Vector2(10, -10), Vector2(12, 10)][index]
+		var x := float(volcano.center.x + local_offset.x)
+		var z := float(volcano.center.y + local_offset.y)
+		var y := _terrain_height(volcano, x, z) + 0.22
+		_add_lava_pool("Lava Pool %d" % index, Vector3(x, y, z))
+
+
+func _add_lava_pool(label: String, position: Vector3) -> void:
+	var hazard := Area3D.new()
+	hazard.name = label
+	hazard.add_to_group("arena_hazards")
+	hazard.collision_layer = 0
+	hazard.collision_mask = 1
+	var mesh := MeshInstance3D.new()
+	var disc := CylinderMesh.new()
+	disc.top_radius = 4.1
+	disc.bottom_radius = 4.1
+	disc.height = 0.16
+	disc.radial_segments = 10
+	mesh.mesh = disc
+	var material := StandardMaterial3D.new()
+	material.albedo_color = Color("#ff5a23")
+	material.emission_enabled = true
+	material.emission = Color("#ff3c12")
+	material.emission_energy_multiplier = 1.6
+	mesh.material_override = material
+	mesh.position.y = -0.05
+	hazard.add_child(mesh)
+	var collider := CollisionShape3D.new()
+	var shape := CylinderShape3D.new()
+	shape.radius = 4.0
+	shape.height = 2.0
+	collider.shape = shape
+	hazard.add_child(collider)
+	hazard.position = position
+	add_child(hazard)
+
+
+func _add_sand_zone(data: Dictionary) -> void:
+	var area := Area3D.new()
+	area.name = "Loose Sand"
+	area.add_to_group("slippery_surfaces")
+	area.collision_layer = 0
+	area.collision_mask = 1
+	var collider := CollisionShape3D.new()
+	var shape := CylinderShape3D.new()
+	shape.radius = 23.0
+	shape.height = 14.0
+	collider.shape = shape
+	collider.position.y = 6.0
+	area.add_child(collider)
+	area.position = Vector3(data.center.x, 0.0, data.center.y)
+	add_child(area)
+
+
+func _add_camera() -> void:
 	var camera := Camera3D.new()
-	camera.name = "Arena overview camera"
-	camera.position = Vector3(0.0, 105.0, 145.0)
-	camera.fov = 60.0
+	camera.name = "Map Preview Camera"
+	camera.position = Vector3(0, 175, 220)
+	camera.look_at(Vector3(0, 0, -5), Vector3.UP)
 	camera.current = true
 	add_child(camera)
-	camera.look_at(Vector3(0.0, 0.0, -5.0), Vector3.UP)
-
-	var world_environment := WorldEnvironment.new()
-	var environment := Environment.new()
-	environment.background_mode = Environment.BG_SKY
-	var sky := Sky.new()
-	var sky_material := ProceduralSkyMaterial.new()
-	sky_material.sky_top_color = Color("41678e")
-	sky_material.sky_horizon_color = Color("e2c49d")
-	sky_material.ground_bottom_color = Color("202631")
-	sky_material.ground_horizon_color = Color("95836f")
-	sky.sky_material = sky_material
-	environment.sky = sky
-	environment.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	environment.ambient_light_color = Color("c8b8a4")
-	environment.ambient_light_energy = 0.7
-	world_environment.environment = environment
-	add_child(world_environment)
-
-
-func _material(color: Color, emission_color: Color = Color(0.0, 0.0, 0.0), emission_energy: float = 0.0) -> StandardMaterial3D:
-	var result := StandardMaterial3D.new()
-	result.albedo_color = color
-	result.roughness = 0.92
-	if emission_energy > 0.0:
-		result.emission_enabled = true
-		result.emission = emission_color
-		result.emission_energy_multiplier = emission_energy
-	return result
